@@ -51,6 +51,32 @@ sudo /opt/pia-wireguard-unifi/watchdog/verify.sh
 
 The installer runs this at the end. The watchdog also re-checks the PIA login once a day, so a changed password shows up as a failed run in the logs well before an outage needs it.
 
+## Email alerts
+
+The installer can set up an email for whenever the watchdog does something or needs you:
+
+| When | Subject |
+|---|---|
+| It swaps in a new config | Switched the VPN to server *X*, checking it connects |
+| The next check sees it connected | VPN connected on server *X* |
+| It can't fix things: the daily limit is reached, the PIA login fails, the router can't be reached, the VPN client is missing | What's wrong, with that run's log |
+| A problem clears up | Resolved: *what was wrong* |
+| Dry-run mode only: the VPN is down and it would have replaced the config | VPN is down (dry run, so nothing was replaced) |
+
+A problem that lasts doesn't email on every 5-minute check: you get one email when it starts, a reminder every 6 hours (`alert_reminder_hours`), and a "Resolved" email when it's fixed.
+
+The emails go out through an email account's SMTP server, sent by the watchdog itself. With the [bypass network](#bypass-network) they still go out while the VPN is down. That's when you need them, and when anything else on a network routed through the VPN (Home Assistant, for example) is cut off too.
+
+To turn them on, re-run the installer and answer **y** to the email question. For Gmail:
+
+1. Your Google account needs 2-Step Verification on.
+2. Create an app password at <https://myaccount.google.com/apppasswords> (name it e.g. "PIA watchdog").
+3. Give the installer that 16-letter app password, not your normal password. It's encrypted like the other two.
+
+An app password can do anything with the mailbox, not just send. If you'd rather the Pi not hold the keys to your main inbox, create a separate Gmail account just for sending, and enter your own address as the one to send alerts to.
+
+The installer sends a test email at the end, and so does `verify.sh` whenever you run it. If the test email arrives but your phone doesn't notify you, check the mail app's notification settings for that inbox.
+
 ## Replace the config right now
 
 To swap in a fresh config immediately, whatever the current status (also a good way to test the whole thing once):
@@ -63,7 +89,7 @@ This works even in dry-run mode. It isn't blocked by the daily limit, but it doe
 
 ## How the passwords are stored
 
-The PIA password and router password are encrypted with `systemd-creds` and stored in `/etc/credstore.encrypted/`. The installer pipes them straight into the encryption, so they never touch disk in plaintext. They're decrypted only while the watchdog runs, into a private in-memory location that only the watchdog can read. The watchdog runs as its own system user (`pia-watchdog`), which has no login, no home folder, and no access to yours.
+The PIA password, router password, and email password (if alerts are on) are encrypted with `systemd-creds` and stored in `/etc/credstore.encrypted/`. The installer pipes them straight into the encryption, so they never touch disk in plaintext. They're decrypted only while the watchdog runs, into a private in-memory location that only the watchdog can read. The watchdog runs as its own system user (`pia-watchdog`), which has no login, no home folder, and no access to yours.
 
 **Limits:** a Pi has no hardware security chip, so the decryption key is on the same SD card. This protects against copies leaking (backups, a stray file, other users on the Pi). It doesn't protect against someone with the whole SD card or root on the Pi. Keep SSH key-only, and use a PIA password you don't use anywhere else.
 
@@ -82,6 +108,11 @@ The PIA password and router password are encrypted with `systemd-creds` and stor
 | `dry_run` | Log only, change nothing (default `true`) |
 | `unhealthy_checks_before_replacing` | Failed checks in a row before replacing (default `3`, i.e. 15 minutes) |
 | `max_replacements_per_day` | Safety cap; past it the service reports a failure instead of replacing again (default `4`) |
+| `alert_email` | Where to send [email alerts](#email-alerts); leave it out to turn them off |
+| `smtp_username` | The email account that sends them (default: `alert_email`) |
+| `smtp_server` | Its SMTP server (default `smtp.gmail.com`) |
+| `smtp_port` | `465` for TLS (default), or `587` for STARTTLS |
+| `alert_reminder_hours` | How often to repeat an alert while a problem lasts (default `6`) |
 
 ## Updating and removing
 
