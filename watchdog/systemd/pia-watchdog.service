@@ -1,0 +1,23 @@
+[Unit]
+Description=Replace the router's PIA WireGuard config when it stops connecting
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 @REPO_DIR@/watchdog/pia_watchdog.py --config /etc/pia-watchdog/config.json
+DynamicUser=yes
+StateDirectory=pia-watchdog
+LoadCredentialEncrypted=pia_password:/etc/credstore.encrypted/pia-watchdog-pia_password
+LoadCredentialEncrypted=router_password:/etc/credstore.encrypted/pia-watchdog-router_password
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
