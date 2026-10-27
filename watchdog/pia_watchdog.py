@@ -95,6 +95,50 @@ def decide(state, healthy, config, now):
     return "replace", state
 
 
+def describe_router_error(e):
+    if isinstance(e, router_push.MfaRequiredError):
+        return "Router login needs a verification code. Use a local-only router account (see watchdog/README.md)."
+    return f"Router: {e}"
+
+
+def check_pia_login(config, state, now):
+    """Confirms the stored PIA password still works. Returns an exit code."""
+    try:
+        pia_config.fetch_token(config["pia_username"], read_secret("pia_password"))
+    except RuntimeError as e:
+        log(f"{e}. Re-run the installer to update the stored PIA password.")
+        return 1
+    except OSError as e:
+        log(f"Couldn't reach PIA to check the login: {e}")
+        return 1
+    state["pia_login_checked_at"] = now
+    return 0
+
+
+def verify(config):
+    """Checks both logins and reports the client's status, changing nothing."""
+    ok = True
+    try:
+        opener, csrf = router_push.login(config["router_url"], config["router_username"], read_secret("router_password"))
+        log(f"Router login OK ({config['router_username']} at {config['router_url']}).")
+        client = router_push.find_wireguard_client(opener, csrf, config["router_url"], config["client_name"])
+        if client is None:
+            log(f"No WireGuard VPN client named {config['client_name']!r} on the router.")
+            ok = False
+        else:
+            _, detail = router_push.wireguard_client_health(opener, csrf, config["router_url"], client)
+            log(f"VPN client {config['client_name']!r}: {detail}.")
+            warn_if_routed_through(opener, csrf, config, client)
+    except (router_push.RouterLoginError, router_push.RouterPushError) as e:
+        log(describe_router_error(e))
+        ok = False
+    if check_pia_login(config, {}, 0) == 0:
+        log(f"PIA login OK ({config['pia_username']}).")
+    else:
+        ok = False
+    return 0 if ok else 1
+
+
 def check_once(config, state, now, replace_now=False):
     """Returns (exit_code, state). replace_now skips the health check, the
     threshold, and dry-run mode, and replaces immediately."""
@@ -113,12 +157,12 @@ def check_once(config, state, now, replace_now=False):
         healthy, detail = router_push.wireguard_client_health(opener, csrf, config["router_url"], client)
         action, state = decide(state, healthy, config, now)
 
-    if action == "healthy":
-        log(f"Healthy: {detail}")
-        return 0, state
-    if action == "waiting":
-        log(f"Unhealthy ({state['unhealthy_checks']}/{threshold}): {detail}")
-        return 0, state
+    if action in ("healthy", "waiting"):
+        log(f"Healthy: {detail}" if action == "healthy"
+            else f"Unhealthy ({state['unhealthy_checks']}/{threshold}): {detail}")
+        # Daily, so a changed or mistyped PIA password surfaces before it's needed.
+        due = now - state.get("pia_login_checked_at", 0) >= DAY_SECONDS
+        return (check_pia_login(config, state, now) if due else 0), state
     if action == "capped":
         log(f"Unhealthy ({detail}), but already replaced {len(state['replacements'])} time(s) "
             f"in the last 24h (max {config['max_replacements_per_day']}). Not replacing again.")
@@ -126,7 +170,8 @@ def check_once(config, state, now, replace_now=False):
 
     current_ip = endpoint_ip(client.get("wireguard_client_configuration_file")) or state.get("last_server_ip")
     if config["dry_run"]:
-        pia_config.fetch_token(config["pia_username"], read_secret("pia_password"))
+        if check_pia_login(config, state, now):
+            return 1, state
         log(f"Unhealthy for {threshold} checks ({detail}). Dry run: would generate a new "
             f"{config['region_id']} config avoiding {current_ip} and update {config['client_name']!r}. "
             f"PIA login OK.")
@@ -140,7 +185,7 @@ def check_once(config, state, now, replace_now=False):
     router_push.update_wireguard_client(
         opener, csrf, config["router_url"], client, conf, f"pia-{config['region_id']}.conf"
     )
-    state.update(unhealthy_checks=0, last_server_ip=server_ip)
+    state.update(unhealthy_checks=0, last_server_ip=server_ip, pia_login_checked_at=now)
     state["replacements"] = state.get("replacements", []) + [now]
     log(f"Replaced {config['client_name']!r} with a new {region_name} config on {server_ip} "
         f"(was {current_ip}). Unhealthy reason: {detail}")
@@ -153,6 +198,8 @@ def main():
     parser.add_argument("--list-regions", action="store_true", help="print PIA region ids and exit")
     parser.add_argument("--replace-now", action="store_true",
                         help="replace the config immediately, even in dry-run mode (use watchdog/replace-now.sh)")
+    parser.add_argument("--verify", action="store_true",
+                        help="check the router and PIA logins, change nothing (use watchdog/verify.sh)")
     args = parser.parse_args()
 
     if args.list_regions:
@@ -163,15 +210,17 @@ def main():
         parser.error("--config is required")
 
     config = {**DEFAULTS, **json.loads(args.config.read_text(encoding="utf-8"))}
+    if args.verify:
+        return verify(config)
     state_path = Path(os.environ.get("STATE_DIRECTORY", ".")) / "state.json"
     state = load_state(state_path)
     try:
         code, state = check_once(config, state, time.time(), replace_now=args.replace_now)
-    except (router_push.RouterLoginError, router_push.RouterPushError, RuntimeError) as e:
-        if isinstance(e, router_push.MfaRequiredError):
-            log("Router login needs a verification code. Use a local-only router account (see watchdog/README.md).")
-        else:
-            log(f"Error: {e}")
+    except (router_push.RouterLoginError, router_push.RouterPushError) as e:
+        log(describe_router_error(e))
+        return 1
+    except (RuntimeError, OSError) as e:
+        log(f"Error: {e}")
         return 1
     save_state(state_path, state)
     return code

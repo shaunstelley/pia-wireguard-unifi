@@ -122,8 +122,12 @@ cp "$REPO_DIR/watchdog/systemd/pia-watchdog.timer" /etc/systemd/system/pia-watch
 systemctl daemon-reload
 systemctl enable --now pia-watchdog.timer >/dev/null
 
-echo "Running a first check..."
-systemctl start pia-watchdog.service || true
-journalctl -u pia-watchdog.service -n 5 --no-pager -o cat
-echo
-echo "Installed. It checks every 5 minutes. Logs: journalctl -u pia-watchdog"
+echo "Checking the router and PIA logins..."
+if "$REPO_DIR/watchdog/verify.sh"; then
+  echo
+  echo "Installed. It checks every 5 minutes. Logs: journalctl -u pia-watchdog"
+else
+  echo
+  echo "Installed, but a check failed (see above). Fix it, then re-run this installer, or just run:" >&2
+  echo "  sudo $REPO_DIR/watchdog/verify.sh" >&2
+fi
