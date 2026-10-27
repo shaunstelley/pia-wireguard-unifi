@@ -98,8 +98,8 @@ class CheckOnceTests(unittest.TestCase):
 
     def test_dry_run_checks_pia_login_but_changes_nothing(self):
         with mock.patch.object(wd.pia_config, "generate_conf") as generate:
-            code, state = wd.check_once(CONFIG, {"unhealthy_checks": 2, "replacements": []}, NOW)
-        self.assertEqual(code, 0)
+            event, state = wd.check_once(CONFIG, {"unhealthy_checks": 2, "replacements": []}, NOW)
+        self.assertEqual(event, "dry_run")
         self.fetch_token.assert_called_once_with("p1234567", "secret")
         generate.assert_not_called()
         wd.router_push.update_wireguard_client.assert_not_called()
@@ -109,8 +109,8 @@ class CheckOnceTests(unittest.TestCase):
         config = {**CONFIG, "dry_run": False}
         with mock.patch.object(wd.pia_config, "generate_conf",
                                return_value=("NEW CONF", "US Texas", "209.87.164.40")) as generate:
-            code, state = wd.check_once(config, {"unhealthy_checks": 2, "replacements": []}, NOW)
-        self.assertEqual(code, 0)
+            event, state = wd.check_once(config, {"unhealthy_checks": 2, "replacements": []}, NOW)
+        self.assertEqual(event, "replaced")
         self.assertEqual(generate.call_args.kwargs["avoid_server_ip"], "209.87.164.32")
         wd.router_push.update_wireguard_client.assert_called_once_with(
             "opener", "csrf", "https://router", CLIENT, "NEW CONF", "pia-us_south_west.conf")
@@ -118,13 +118,13 @@ class CheckOnceTests(unittest.TestCase):
 
     def test_missing_client_is_an_error(self):
         wd.router_push.find_wireguard_client.return_value = None
-        code, _ = wd.check_once(CONFIG, {"unhealthy_checks": 0, "replacements": []}, NOW)
-        self.assertEqual(code, 1)
+        event, _ = wd.check_once(CONFIG, {"unhealthy_checks": 0, "replacements": []}, NOW)
+        self.assertEqual(event, "no_client")
 
     def test_replace_now_ignores_dry_run_and_health(self):
         with mock.patch.object(wd.pia_config, "generate_conf", return_value=("NEW", "US Texas", "2.2.2.2")):
-            code, state = wd.check_once(CONFIG, {"unhealthy_checks": 0, "replacements": []}, NOW, replace_now=True)
-        self.assertEqual((code, state["replacements"]), (0, [NOW]))
+            event, state = wd.check_once(CONFIG, {"unhealthy_checks": 0, "replacements": []}, NOW, replace_now=True)
+        self.assertEqual((event, state["replacements"]), ("replaced", [NOW]))
         wd.router_push.wireguard_client_health.assert_not_called()
         wd.router_push.update_wireguard_client.assert_called_once()
 
@@ -136,18 +136,18 @@ class CheckOnceTests(unittest.TestCase):
 
     def test_checks_the_pia_login_once_a_day_while_healthy(self):
         wd.router_push.wireguard_client_health.return_value = (True, "status CONNECTED")
-        code, state = wd.check_once(CONFIG, {"unhealthy_checks": 0, "replacements": []}, NOW)
-        self.assertEqual((code, state["pia_login_checked_at"]), (0, NOW))
+        event, state = wd.check_once(CONFIG, {"unhealthy_checks": 0, "replacements": []}, NOW)
+        self.assertEqual((event, state["pia_login_checked_at"]), ("healthy", NOW))
         self.fetch_token.reset_mock()
-        code, _ = wd.check_once(CONFIG, state, NOW + 300)
-        self.assertEqual(code, 0)
+        event, _ = wd.check_once(CONFIG, state, NOW + 300)
+        self.assertEqual(event, "healthy")
         self.fetch_token.assert_not_called()
 
     def test_a_rejected_pia_password_fails_the_run(self):
         wd.router_push.wireguard_client_health.return_value = (True, "status CONNECTED")
         self.fetch_token.side_effect = RuntimeError("PIA login failed: HTTP 401")
-        code, state = wd.check_once(CONFIG, {"unhealthy_checks": 0, "replacements": []}, NOW)
-        self.assertEqual(code, 1)
+        event, state = wd.check_once(CONFIG, {"unhealthy_checks": 0, "replacements": []}, NOW)
+        self.assertEqual(event, "pia_login")
         self.assertNotIn("pia_login_checked_at", state)
         self.assertIn("update the stored PIA password", self.logged())
 
@@ -156,6 +156,16 @@ class CheckOnceTests(unittest.TestCase):
         self.assertEqual(wd.verify(CONFIG), 0)
         self.assertIn("Router login OK", self.logged())
         self.assertIn("PIA login OK", self.logged())
+
+    def test_verify_sends_a_test_email_when_alerts_are_on(self):
+        wd.router_push.wireguard_client_health.return_value = (True, "status CONNECTED")
+        config = {**CONFIG, "alert_email": "me@example.com"}
+        with mock.patch.object(wd, "send_email") as send:
+            self.assertEqual(wd.verify(config), 0)
+        self.assertEqual(send.call_args.args[1], "Test email")
+        with mock.patch.object(wd, "send_email", side_effect=OSError("535 bad credentials")):
+            self.assertEqual(wd.verify(config), 1)
+        self.assertIn("Couldn't send the test email: 535", self.logged())
 
     def test_verify_still_checks_pia_when_the_router_fails(self):
         wd.router_push.login.side_effect = wd.router_push.RouterLoginError("Login failed: HTTP 401")
@@ -167,10 +177,67 @@ class CheckOnceTests(unittest.TestCase):
     def test_unreachable_pia_is_not_called_a_password_problem(self):
         wd.router_push.wireguard_client_health.return_value = (True, "status CONNECTED")
         self.fetch_token.side_effect = OSError("timed out")
-        code, _ = wd.check_once(CONFIG, {"unhealthy_checks": 0, "replacements": []}, NOW)
-        self.assertEqual(code, 1)
+        event, _ = wd.check_once(CONFIG, {"unhealthy_checks": 0, "replacements": []}, NOW)
+        self.assertEqual(event, "pia_login")
         self.assertIn("Couldn't reach PIA", self.logged())
         self.assertNotIn("password", self.logged())
+
+
+class AlertTests(unittest.TestCase):
+    EMAIL_CONFIG = {**CONFIG, "alert_email": "me@example.com", "smtp_username": "sender@example.com"}
+
+    def plan(self, state, event, now=NOW):
+        return wd.plan_alert(state, event, now, CONFIG)
+
+    def test_a_problem_emails_once_then_reminds(self):
+        subject, state = self.plan({}, "capped")
+        self.assertEqual(subject, wd.ALERTS["capped"])
+        self.assertEqual(self.plan(state, "capped", NOW + 300)[0], None)
+        subject, later = self.plan(state, "capped", NOW + 6 * 3600)
+        self.assertEqual(subject, "Still: " + wd.ALERTS["capped"])
+        self.assertEqual(later["alert"]["since"], NOW)
+
+    def test_a_different_problem_emails_right_away(self):
+        _, state = self.plan({}, "router_error")
+        self.assertEqual(self.plan(state, "pia_login", NOW + 300)[0], wd.ALERTS["pia_login"])
+
+    def test_healthy_closes_an_open_alert(self):
+        _, state = self.plan({}, "pia_login")
+        subject, state = self.plan(state, "healthy", NOW + 300)
+        self.assertEqual(subject, "Resolved: " + wd.ALERTS["pia_login"])
+        self.assertNotIn("alert", state)
+        self.assertEqual(self.plan(state, "healthy", NOW + 600)[0], None)
+
+    def test_a_replacement_emails_then_confirms(self):
+        subject, state = self.plan({"last_server_ip": "2.2.2.2"}, "replaced")
+        self.assertIn("2.2.2.2", subject)
+        self.assertEqual(self.plan(state, "waiting", NOW + 300), (None, state))
+        self.assertEqual(self.plan(state, "healthy", NOW + 300)[0], "VPN connected on server 2.2.2.2")
+
+    def test_alerts_are_off_without_an_address(self):
+        with mock.patch.object(wd, "send_email") as send:
+            state = wd.send_alert(CONFIG, {}, "capped", NOW)
+        send.assert_not_called()
+        self.assertEqual(state, {})
+
+    def test_a_failed_email_is_retried_next_run(self):
+        with mock.patch.object(wd, "send_email", side_effect=OSError("connection refused")), \
+             mock.patch.object(wd, "log") as log:
+            state = wd.send_alert(self.EMAIL_CONFIG, {}, "capped", NOW)
+        self.assertEqual(state, {})
+        self.assertIn("Couldn't send the alert email", log.call_args.args[0])
+
+    def test_sends_over_implicit_tls_with_the_stored_password(self):
+        with tempfile.TemporaryDirectory() as creds, \
+             mock.patch.dict(os.environ, {"CREDENTIALS_DIRECTORY": creds}), \
+             mock.patch.object(wd.smtplib, "SMTP_SSL") as smtp_ssl:
+            Path(creds, "smtp_password").write_text("abcd efgh ijkl mnop\n")
+            wd.send_email({**self.EMAIL_CONFIG, "smtp_username": "me@gmail.com"}, "Test email", "body")
+        smtp = smtp_ssl.return_value.__enter__.return_value
+        self.assertEqual(smtp_ssl.call_args.args, ("smtp.gmail.com", 465))
+        smtp.login.assert_called_once_with("me@gmail.com", "abcdefghijklmnop")
+        msg = smtp.send_message.call_args.args[0]
+        self.assertEqual((msg["Subject"], msg["To"]), ("PIA watchdog: Test email", "me@example.com"))
 
 
 class RouterCallTests(unittest.TestCase):

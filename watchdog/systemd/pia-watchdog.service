@@ -12,6 +12,8 @@ Group=pia-watchdog
 StateDirectory=pia-watchdog
 LoadCredentialEncrypted=pia_password:/etc/credstore.encrypted/pia-watchdog-pia_password
 LoadCredentialEncrypted=router_password:/etc/credstore.encrypted/pia-watchdog-router_password
+# smtp_password exists only while email alerts are on; install.sh drops both lines otherwise.
+LoadCredentialEncrypted=smtp_password:/etc/credstore.encrypted/pia-watchdog-smtp_password
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

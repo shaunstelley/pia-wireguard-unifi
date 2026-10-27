@@ -10,9 +10,12 @@ import argparse
 import json
 import os
 import re
+import smtplib
 import socket
+import ssl
 import sys
 import time
+from email.message import EmailMessage
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -26,10 +29,29 @@ DEFAULTS = {
     "dry_run": True,
     "unhealthy_checks_before_replacing": 3,
     "max_replacements_per_day": 4,
+    "smtp_server": "smtp.gmail.com",
+    "smtp_port": 465,
+    "alert_reminder_hours": 6,
 }
+
+# Run results worth an email, with their subjects. Each one opens an alert
+# that's repeated every alert_reminder_hours while it lasts and closed by an
+# all-clear email on the next healthy check. FAILED ones also fail the run.
+ALERTS = {
+    "capped": "VPN is down and the daily replacement limit is reached",
+    "pia_login": "PIA login check failed",
+    "no_client": "VPN client not found on the router",
+    "router_error": "Problem talking to the router",
+    "error": "Watchdog run failed",
+    "dry_run": "VPN is down (dry run, so nothing was replaced)",
+}
+FAILED = {"capped", "pia_login", "no_client", "router_error", "error"}
+
+run_log = []  # this run's messages, for the alert email
 
 
 def log(message):
+    run_log.append(message)
     print(message, flush=True)
 
 
@@ -115,6 +137,68 @@ def check_pia_login(config, state, now):
     return 0
 
 
+def plan_alert(state, event, now, config):
+    """Pure decision step: returns (email subject or None, state). state["alert"]
+    is the open alert the user was last emailed about."""
+    state = dict(state)
+    alert = state.pop("alert", None)
+    if event == "replaced":
+        state["alert"] = {"event": event, "since": now, "sent_at": now}
+        return f"Switched the VPN to server {state['last_server_ip']}, checking it connects", state
+    if event == "healthy":
+        if alert is None:
+            return None, state
+        if alert["event"] == "replaced":
+            return f"VPN connected on server {state.get('last_server_ip')}", state
+        return f"Resolved: {ALERTS[alert['event']]}", state
+    if event not in ALERTS:  # waiting: give it a few more checks
+        if alert:
+            state["alert"] = alert
+        return None, state
+    same = alert is not None and alert["event"] == event
+    if same and now - alert["sent_at"] < config["alert_reminder_hours"] * 3600:
+        state["alert"] = alert
+        return None, state
+    state["alert"] = {"event": event, "since": alert["since"] if same else now, "sent_at": now}
+    return ("Still: " if same else "") + ALERTS[event], state
+
+
+def send_email(config, subject, body):
+    msg = EmailMessage()
+    msg["Subject"] = f"PIA watchdog: {subject}"
+    msg["From"] = config.get("smtp_username") or config["alert_email"]
+    msg["To"] = config["alert_email"]
+    msg.set_content(f"{body}\n\n(pia-watchdog on {socket.gethostname()}; logs: journalctl -u pia-watchdog)\n")
+    password = read_secret("smtp_password")
+    if config["smtp_server"] == "smtp.gmail.com":
+        password = password.replace(" ", "")  # Gmail shows app passwords in groups of four
+    context = ssl.create_default_context()
+    implicit_tls = config["smtp_port"] == 465
+    smtp_class = smtplib.SMTP_SSL if implicit_tls else smtplib.SMTP
+    with smtp_class(config["smtp_server"], config["smtp_port"], timeout=30,
+                    **({"context": context} if implicit_tls else {})) as smtp:
+        if not implicit_tls:
+            smtp.starttls(context=context)
+        smtp.login(msg["From"], password)
+        smtp.send_message(msg)
+
+
+def send_alert(config, state, event, now):
+    """Emails about this run's event if needed. Returns the new state; if the
+    email fails, the old one, so the next run tries again."""
+    if not config.get("alert_email"):
+        return state
+    subject, new_state = plan_alert(state, event, now, config)
+    if subject is None:
+        return new_state
+    try:
+        send_email(config, subject, "\n".join(run_log))
+    except (OSError, RuntimeError) as e:
+        log(f"Couldn't send the alert email: {e}")
+        return state
+    return new_state
+
+
 def verify(config):
     """Checks both logins and reports the client's status, changing nothing."""
     ok = True
@@ -136,17 +220,26 @@ def verify(config):
         log(f"PIA login OK ({config['pia_username']}).")
     else:
         ok = False
+    if config.get("alert_email"):
+        try:
+            send_email(config, "Test email", "Email alerts work. You'll hear from the watchdog when it replaces "
+                       "the VPN config, when the new one connects, and when something needs your attention.")
+            log(f"Sent a test email to {config['alert_email']}.")
+        except (OSError, RuntimeError) as e:
+            log(f"Couldn't send the test email: {e}")
+            ok = False
     return 0 if ok else 1
 
 
 def check_once(config, state, now, replace_now=False):
-    """Returns (exit_code, state). replace_now skips the health check, the
+    """Returns (event, state), event being one of "healthy", "waiting",
+    "replaced", or an ALERTS key. replace_now skips the health check, the
     threshold, and dry-run mode, and replaces immediately."""
     opener, csrf = router_push.login(config["router_url"], config["router_username"], read_secret("router_password"))
     client = router_push.find_wireguard_client(opener, csrf, config["router_url"], config["client_name"])
     if client is None:
         log(f"No WireGuard VPN client named {config['client_name']!r} on the router.")
-        return 1, state
+        return "no_client", state
     warn_if_routed_through(opener, csrf, config, client)
 
     threshold = config["unhealthy_checks_before_replacing"]
@@ -162,21 +255,21 @@ def check_once(config, state, now, replace_now=False):
             else f"Unhealthy ({state['unhealthy_checks']}/{threshold}): {detail}")
         # Daily, so a changed or mistyped PIA password surfaces before it's needed.
         due = now - state.get("pia_login_checked_at", 0) >= DAY_SECONDS
-        return (check_pia_login(config, state, now) if due else 0), state
+        return ("pia_login" if due and check_pia_login(config, state, now) else action), state
     if action == "capped":
         log(f"Unhealthy ({detail}), but already replaced {len(state['replacements'])} time(s) "
             f"in the last 24h (max {config['max_replacements_per_day']}). Not replacing again.")
-        return 1, state
+        return "capped", state
 
     current_ip = endpoint_ip(client.get("wireguard_client_configuration_file")) or state.get("last_server_ip")
     if config["dry_run"]:
         if check_pia_login(config, state, now):
-            return 1, state
+            return "pia_login", state
         log(f"Unhealthy for {threshold} checks ({detail}). Dry run: would generate a new "
             f"{config['region_id']} config avoiding {current_ip} and update {config['client_name']!r}. "
             f"PIA login OK.")
         state["unhealthy_checks"] = 0
-        return 0, state
+        return "dry_run", state
 
     conf, region_name, server_ip = pia_config.generate_conf(
         config["pia_username"], read_secret("pia_password"), config["region_id"],
@@ -189,7 +282,7 @@ def check_once(config, state, now, replace_now=False):
     state["replacements"] = state.get("replacements", []) + [now]
     log(f"Replaced {config['client_name']!r} with a new {region_name} config on {server_ip} "
         f"(was {current_ip}). Unhealthy reason: {detail}")
-    return 0, state
+    return "replaced", state
 
 
 def main():
@@ -214,16 +307,17 @@ def main():
         return verify(config)
     state_path = Path(os.environ.get("STATE_DIRECTORY", ".")) / "state.json"
     state = load_state(state_path)
+    now = time.time()
     try:
-        code, state = check_once(config, state, time.time(), replace_now=args.replace_now)
+        event, state = check_once(config, state, now, replace_now=args.replace_now)
     except (router_push.RouterLoginError, router_push.RouterPushError) as e:
         log(describe_router_error(e))
-        return 1
+        event = "router_error"
     except (RuntimeError, OSError) as e:
         log(f"Error: {e}")
-        return 1
-    save_state(state_path, state)
-    return code
+        event = "error"
+    save_state(state_path, send_alert(config, state, event, now))
+    return 1 if event in FAILED else 0
 
 
 if __name__ == "__main__":
