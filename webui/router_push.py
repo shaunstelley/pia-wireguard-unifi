@@ -196,6 +196,72 @@ def list_networks(opener, csrf_token, base_url, site="default", timeout=15):
     ]
 
 
+def find_wireguard_client(opener, csrf_token, base_url, name, site="default"):
+    """The router's WireGuard VPN client entry with this name (its full
+    networkconf record), or None."""
+    base_url = base_url.rstrip("/")
+    result = _authed_request(opener, csrf_token, f"{base_url}/proxy/network/api/s/{site}/rest/networkconf")
+    return next(
+        (e for e in result.get("data", [])
+         if e.get("purpose") == "vpn-client" and e.get("vpn_type") == "wireguard-client" and e.get("name") == name),
+        None,
+    )
+
+
+def wireguard_client_health(opener, csrf_token, base_url, client, site="default"):
+    """(healthy, detail). Healthy only when the router reports the client as
+    exactly "CONNECTED" — any other status, or no entry, counts as unhealthy."""
+    base_url = base_url.rstrip("/")
+    result = _authed_request(opener, csrf_token, f"{base_url}/proxy/network/v2/api/site/{site}/vpn/connections")
+    conn = next((c for c in result.get("connections", []) if c.get("network_id") == client["_id"]), None)
+    if conn is None:
+        return False, "the router lists no connection for this client"
+    detail = f"status {conn.get('status')}, server {conn.get('remote_ip')}"
+    if conn.get("notes"):
+        detail += f", notes: {conn['notes']}"
+    return conn.get("status") == "CONNECTED", detail
+
+
+def update_wireguard_client(opener, csrf_token, base_url, client, conf_text, filename, site="default"):
+    """Swap a new config into an existing client, keeping its _id so traffic
+    routes that point at it stay attached. Mirrors the Network app's own edit:
+    the full record goes back with only the config fields changed, minus
+    ip_subnet, which the router derives from the config."""
+    base_url = base_url.rstrip("/")
+    body = {k: v for k, v in client.items() if k != "ip_subnet"}
+    body.update(wireguard_client_configuration_file=conf_text, wireguard_client_configuration_filename=filename)
+    result = _authed_request(
+        opener, csrf_token, f"{base_url}/proxy/network/api/s/{site}/rest/networkconf/{client['_id']}",
+        method="PUT", body=body,
+    )
+    if result.get("meta", {}).get("rc") != "ok":
+        raise RouterPushError(f"Updating VPN client failed: {result.get('meta')}")
+    return result["data"][0]
+
+
+def routes_through_client(opener, csrf_token, base_url, client, device_ip, site="default"):
+    """Whether the device with this LAN IP is sent through the client by an
+    enabled traffic route, either directly or via its whole network."""
+    base_url = base_url.rstrip("/")
+    routes = _authed_request(opener, csrf_token, f"{base_url}/proxy/network/v2/api/site/{site}/trafficroutes")
+    targets = [t for r in routes if r.get("enabled") and r.get("network_id") == client["_id"]
+               for t in r.get("target_devices", [])]
+    if not targets:
+        return False
+    devices = _authed_request(
+        opener, csrf_token,
+        f"{base_url}/proxy/network/v2/api/site/{site}/clients/active?includeTrafficUsage=true&includeUnifiDevices=true",
+    )
+    me = next((d for d in devices if d.get("ip") == device_ip), None)
+    if me is None:
+        return False
+    return any(
+        (t.get("type") == "CLIENT" and t.get("client_mac") == me.get("mac"))
+        or (t.get("type") == "NETWORK" and t.get("network_id") == me.get("network_id"))
+        for t in targets
+    )
+
+
 def list_devices(opener, csrf_token, base_url, site="default", timeout=15):
     """Active LAN clients/devices available as a traffic-route target (type
     CLIENT). Captured directly from a real "route by device" action:

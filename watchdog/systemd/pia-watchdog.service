@@ -1,0 +1,26 @@
+[Unit]
+Description=Replace the router's PIA WireGuard config when it stops connecting
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 @REPO_DIR@/watchdog/pia_watchdog.py --config /etc/pia-watchdog/config.json
+# A fixed user, so the bypass network's routing rule (see install.sh) can match its traffic.
+User=pia-watchdog
+Group=pia-watchdog
+StateDirectory=pia-watchdog
+LoadCredentialEncrypted=pia_password:/etc/credstore.encrypted/pia-watchdog-pia_password
+LoadCredentialEncrypted=router_password:/etc/credstore.encrypted/pia-watchdog-router_password
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+# IPv4 only: the bypass routing rule is IPv4, and PIA's API works over IPv4.
+RestrictAddressFamilies=AF_INET AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes

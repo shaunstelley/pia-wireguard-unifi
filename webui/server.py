@@ -2,7 +2,6 @@
 """Local web UI for generating a PIA WireGuard client config (no manual editing needed)."""
 
 import json
-import os
 import re
 import shlex
 import socket
@@ -10,8 +9,6 @@ import subprocess
 import tempfile
 import threading
 import time
-import urllib.request
-import urllib.error
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,6 +16,7 @@ from pathlib import Path
 from urllib.parse import urlsplit, parse_qs
 
 import router_push
+from pia_config import fetch_regions, generate_conf
 
 PORT = 8765
 # How long a router login session (opener + CSRF token) is reused for
@@ -33,27 +31,8 @@ ALLOWED_ORIGINS = {f"http://{host}" for host in ALLOWED_HOSTS}
 DEFAULT_LATENCY_MS = 50
 MIN_LATENCY_MS = 1
 MAX_LATENCY_MS = 10000
-REPO_ROOT = Path(__file__).resolve().parent.parent
-CONNECT_SCRIPT = REPO_ROOT / "connect_to_wireguard_with_token.sh"
 INDEX_HTML = Path(__file__).resolve().parent / "index.html"
 VALIDATE_HELPER = Path(__file__).resolve().parent / "validate_helper.sh"
-
-SERVERLIST_URL = "https://serverlist.piaservers.net/vpninfo/servers/v6"
-TOKEN_URL = "https://www.privateinternetaccess.com/api/client/v2/token"
-# Cloudflare (fronting both PIA hosts) blocks Python's default "Python-urllib/3.x"
-# User-Agent with a 403, even for requests that are otherwise identical to curl's
-# (which get_token.sh uses, and which passes) — so PIA_USER/PIA_PASS with correct
-# credentials would still fail. Any non-blocked UA works; curl's is the simplest
-# match for the reference implementation.
-USER_AGENT = "curl/8.7.1"
-
-
-def fetch_regions():
-    req = urllib.request.Request(SERVERLIST_URL, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        first_line = resp.read().decode("utf-8").splitlines()[0]
-    data = json.loads(first_line)
-    return [r for r in data["regions"] if r.get("servers", {}).get("wg")]
 
 
 def measure_latency(ip, port=443, timeout_ms=DEFAULT_LATENCY_MS):
@@ -85,79 +64,6 @@ def fetch_regions_with_latency(timeout_ms=DEFAULT_LATENCY_MS):
     ]
     result.sort(key=lambda r: (r["latency_ms"] is None, r["latency_ms"]))
     return result
-
-
-def multipart_body(fields):
-    boundary = uuid.uuid4().hex
-    lines = []
-    for name, value in fields.items():
-        lines.append(f"--{boundary}")
-        lines.append(f'Content-Disposition: form-data; name="{name}"')
-        lines.append("")
-        lines.append(value)
-    lines.append(f"--{boundary}--")
-    lines.append("")
-    body = "\r\n".join(lines).encode("utf-8")
-    return body, f"multipart/form-data; boundary={boundary}"
-
-
-def fetch_token(username, password):
-    body, content_type = multipart_body({"username": username, "password": password})
-    req = urllib.request.Request(
-        TOKEN_URL,
-        data=body,
-        method="POST",
-        headers={"Content-Type": content_type, "User-Agent": USER_AGENT},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"PIA login failed: HTTP {e.code}")
-    token = data.get("token")
-    if not token:
-        raise RuntimeError("PIA login failed: invalid username or password")
-    return token
-
-
-def generate_conf(username, password, region_id, include_dns):
-    regions = fetch_regions()
-    region = next((r for r in regions if r["id"] == region_id), None)
-    if region is None:
-        raise RuntimeError(f"Unknown region: {region_id}")
-
-    token = fetch_token(username, password)
-    wg = region["servers"]["wg"][0]
-
-    fd, conf_path = tempfile.mkstemp(prefix="pia-", suffix=".conf")
-    os.close(fd)
-    try:
-        env = dict(os.environ)
-        env.update(
-            {
-                "PIA_TOKEN": token,
-                "WG_SERVER_IP": wg["ip"],
-                "WG_HOSTNAME": wg["cn"],
-                "PIA_CONNECT": "false",
-                "PIA_DNS": "true" if include_dns else "false",
-                "PIA_CONF_PATH": conf_path,
-            }
-        )
-        result = subprocess.run(
-            ["bash", str(CONNECT_SCRIPT)],
-            cwd=REPO_ROOT,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(
-                "Config generation failed:\n" + (result.stderr or result.stdout or "unknown error")
-            )
-        return Path(conf_path).read_text(encoding="utf-8"), region["name"]
-    finally:
-        Path(conf_path).unlink(missing_ok=True)
 
 
 def run_admin(args, timeout=90):
@@ -322,7 +228,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length) or b"{}")
-            conf, region_name = generate_conf(
+            conf, region_name, _server_ip = generate_conf(
                 body["username"],
                 body["password"],
                 body["region"],

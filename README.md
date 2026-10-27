@@ -15,6 +15,7 @@ Then double-click `launch-webui.command` in the cloned folder and follow the thr
 
 - **`webui/`**: the local web UI.
 - **`launch-webui.command`**: a double-click launcher for it.
+- **`watchdog/`**: an optional background job for an always-on machine like a Raspberry Pi. It replaces the router's PIA config automatically when the connection fails. See [watchdog/README.md](watchdog/README.md).
 - **Two fixes to PIA's scripts:**
   - `connect_to_wireguard_with_token.sh` adds `/32` to the WireGuard `Address` line; some routers' config importers reject it without that.
   - `run_setup.sh` no longer turns off PIA DNS on macOS because of a Linux-only `resolvconf` check.
