@@ -89,16 +89,18 @@ class CheckOnceTests(unittest.TestCase):
         patcher = mock.patch.multiple(wd, log=mock.DEFAULT, lan_ip_toward=mock.Mock(return_value="192.168.11.151"))
         self.mocks = patcher.start()
         self.addCleanup(patcher.stop)
+        token = mock.patch.object(wd.pia_config, "fetch_token", return_value="token")
+        self.fetch_token = token.start()
+        self.addCleanup(token.stop)
 
     def logged(self):
         return " ".join(str(c.args[0]) for c in self.mocks["log"].call_args_list)
 
     def test_dry_run_checks_pia_login_but_changes_nothing(self):
-        with mock.patch.object(wd.pia_config, "fetch_token") as fetch_token, \
-             mock.patch.object(wd.pia_config, "generate_conf") as generate:
+        with mock.patch.object(wd.pia_config, "generate_conf") as generate:
             code, state = wd.check_once(CONFIG, {"unhealthy_checks": 2, "replacements": []}, NOW)
         self.assertEqual(code, 0)
-        fetch_token.assert_called_once_with("p1234567", "secret")
+        self.fetch_token.assert_called_once_with("p1234567", "secret")
         generate.assert_not_called()
         wd.router_push.update_wireguard_client.assert_not_called()
         self.assertEqual(state["replacements"], [])
@@ -131,6 +133,44 @@ class CheckOnceTests(unittest.TestCase):
         wd.router_push.wireguard_client_health.return_value = (True, "status CONNECTED")
         wd.check_once(CONFIG, {"unhealthy_checks": 0, "replacements": []}, NOW)
         self.assertIn("is routed through 'PIA US Texas'", self.logged())
+
+    def test_checks_the_pia_login_once_a_day_while_healthy(self):
+        wd.router_push.wireguard_client_health.return_value = (True, "status CONNECTED")
+        code, state = wd.check_once(CONFIG, {"unhealthy_checks": 0, "replacements": []}, NOW)
+        self.assertEqual((code, state["pia_login_checked_at"]), (0, NOW))
+        self.fetch_token.reset_mock()
+        code, _ = wd.check_once(CONFIG, state, NOW + 300)
+        self.assertEqual(code, 0)
+        self.fetch_token.assert_not_called()
+
+    def test_a_rejected_pia_password_fails_the_run(self):
+        wd.router_push.wireguard_client_health.return_value = (True, "status CONNECTED")
+        self.fetch_token.side_effect = RuntimeError("PIA login failed: HTTP 401")
+        code, state = wd.check_once(CONFIG, {"unhealthy_checks": 0, "replacements": []}, NOW)
+        self.assertEqual(code, 1)
+        self.assertNotIn("pia_login_checked_at", state)
+        self.assertIn("update the stored PIA password", self.logged())
+
+    def test_verify_reports_both_logins(self):
+        wd.router_push.wireguard_client_health.return_value = (True, "status CONNECTED, server 1.2.3.4")
+        self.assertEqual(wd.verify(CONFIG), 0)
+        self.assertIn("Router login OK", self.logged())
+        self.assertIn("PIA login OK", self.logged())
+
+    def test_verify_still_checks_pia_when_the_router_fails(self):
+        wd.router_push.login.side_effect = wd.router_push.RouterLoginError("Login failed: HTTP 401")
+        self.fetch_token.side_effect = RuntimeError("PIA login failed: HTTP 401")
+        self.assertEqual(wd.verify(CONFIG), 1)
+        self.assertIn("Router: Login failed", self.logged())
+        self.assertIn("PIA login failed", self.logged())
+
+    def test_unreachable_pia_is_not_called_a_password_problem(self):
+        wd.router_push.wireguard_client_health.return_value = (True, "status CONNECTED")
+        self.fetch_token.side_effect = OSError("timed out")
+        code, _ = wd.check_once(CONFIG, {"unhealthy_checks": 0, "replacements": []}, NOW)
+        self.assertEqual(code, 1)
+        self.assertIn("Couldn't reach PIA", self.logged())
+        self.assertNotIn("password", self.logged())
 
 
 class RouterCallTests(unittest.TestCase):

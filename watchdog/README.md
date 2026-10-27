@@ -41,6 +41,16 @@ ip route get 1.1.1.1 uid "$(id -u pia-watchdog)"
 
 This should show the VLAN interface (e.g. `eth0.2`), not your main one.
 
+## Check the logins
+
+The PIA password is only needed when a replacement happens, so a normal check doesn't prove it works. To confirm both logins and see the client's status, changing nothing:
+
+```bash
+sudo /opt/pia-wireguard-unifi/watchdog/verify.sh
+```
+
+The installer runs this at the end. The watchdog also re-checks the PIA login once a day, so a changed password shows up as a failed run in the logs well before an outage needs it.
+
 ## Replace the config right now
 
 To swap in a fresh config immediately, whatever the current status (also a good way to test the whole thing once):
