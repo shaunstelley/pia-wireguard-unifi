@@ -59,7 +59,7 @@ The installer can set up an email for whenever the watchdog does something or ne
 |---|---|
 | It swaps in a new config | Switched the VPN to server *X*, checking it connects |
 | The next check sees it connected | VPN connected on server *X* |
-| It can't fix things: the daily limit is reached, the PIA login fails, the router can't be reached, the VPN client is missing | What's wrong, with that run's log |
+| It can't fix things: [new servers aren't helping](#when-new-servers-dont-help), the PIA login fails, the router can't be reached, the VPN client is missing | What's wrong, with that run's log |
 | A problem clears up | Resolved: *what was wrong* |
 | Dry-run mode only: the VPN is down and it would have replaced the config | VPN is down (dry run, so nothing was replaced) |
 
@@ -85,7 +85,13 @@ To swap in a fresh config immediately, whatever the current status (also a good 
 sudo /opt/pia-wireguard-unifi/watchdog/replace-now.sh
 ```
 
-This works even in dry-run mode. It isn't blocked by the daily limit, but it does count toward it.
+This works even in dry-run mode, and even when it has [stopped replacing](#when-new-servers-dont-help). It counts as a replacement that still has to prove itself.
+
+## When new servers don't help
+
+A new server that stays connected for 10 minutes counts as a success and clears the count, so a replacement that's needed days or hours later is never held back. One that doesn't connect, or drops sooner than that, counts as a failure.
+
+After 3 failures in a row, about 20 minutes in, this is likely more than one bad server. The watchdog emails you and slows down to one new server an hour, so it recovers by itself when the problem clears, without requesting new keys every few minutes. There's no limit on replacements that work, so if it's replacing a lot, the emails are how you'll know.
 
 ## How the passwords are stored
 
@@ -108,7 +114,9 @@ The PIA password, router password, and email password (if alerts are on) are enc
 | `dry_run` | Log only, change nothing (default `true`) |
 | `unhealthy_checks_before_replacing` | Failed checks in a row before replacing (default `3`) |
 | `recheck_seconds` | Wait between checks after a failed one (default `60`); `0` waits for the 5-minute timer instead, about 15 minutes in all |
-| `max_replacements_per_day` | Safety cap; past it the service reports a failure instead of replacing again (default `4`) |
+| `max_failed_replacements` | Replacements in a row that don't hold before slowing down (default `3`) |
+| `stable_connection_minutes` | How long a connection must hold to count as a success (default `10`) |
+| `retry_minutes_after_failed_replacements` | Time between new servers once it has slowed down (default `60`) |
 | `alert_email` | Where to send [email alerts](#email-alerts); leave it out to turn them off |
 | `smtp_username` | The email account that sends them (default: `alert_email`) |
 | `smtp_server` | Its SMTP server (default `smtp.gmail.com`) |

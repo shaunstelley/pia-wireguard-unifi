@@ -30,7 +30,9 @@ DEFAULTS = {
     "dry_run": True,
     "unhealthy_checks_before_replacing": 3,
     "recheck_seconds": 60,
-    "max_replacements_per_day": 4,
+    "max_failed_replacements": 3,
+    "stable_connection_minutes": 10,
+    "retry_minutes_after_failed_replacements": 60,
     "smtp_server": "smtp.gmail.com",
     "smtp_port": 465,
     "alert_reminder_hours": 6,
@@ -40,7 +42,7 @@ DEFAULTS = {
 # that's repeated every alert_reminder_hours while it lasts and closed by an
 # all-clear email on the next healthy check. FAILED ones also fail the run.
 ALERTS = {
-    "capped": "VPN is down and the daily replacement limit is reached",
+    "capped": "VPN is down and new servers aren't fixing it",
     "pia_login": "PIA login check failed",
     "no_client": "VPN client not found on the router",
     "router_error": "Problem talking to the router",
@@ -93,7 +95,7 @@ def load_state(path):
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return {"unhealthy_checks": 0, "replacements": []}
+        return {"unhealthy_checks": 0}
 
 
 def save_state(path, state):
@@ -106,15 +108,20 @@ def decide(state, healthy, config, now):
     """Pure decision step: returns (action, state) with action one of
     "healthy", "waiting", "replace", "capped"."""
     state = dict(state)
-    recent = [t for t in state.get("replacements", []) if now - t < DAY_SECONDS]
-    state["replacements"] = recent
+    state.pop("replacements", None)  # the old daily limit's record
     if healthy:
         state["unhealthy_checks"] = 0
+        # A replacement only counts as having worked once it has held for a while.
+        connected_since = state.setdefault("connected_since", now)
+        if now - connected_since >= config["stable_connection_minutes"] * 60:
+            state["failed_replacements"] = 0
         return "healthy", state
+    state.pop("connected_since", None)
     state["unhealthy_checks"] = state.get("unhealthy_checks", 0) + 1
     if state["unhealthy_checks"] < config["unhealthy_checks_before_replacing"]:
         return "waiting", state
-    if len(recent) >= config["max_replacements_per_day"]:
+    retry_at = state.get("last_replacement_at", 0) + config["retry_minutes_after_failed_replacements"] * 60
+    if state.get("failed_replacements", 0) >= config["max_failed_replacements"] and now < retry_at:
         return "capped", state
     return "replace", state
 
@@ -145,6 +152,9 @@ def plan_alert(state, event, now, config):
     state = dict(state)
     alert = state.pop("alert", None)
     if event == "replaced":
+        if alert and alert["event"] == "capped":  # a slow retry during an outage they know about
+            state["alert"] = alert
+            return None, state
         state["alert"] = {"event": event, "since": now, "sent_at": now}
         return f"Switched the VPN to server {state['last_server_ip']}, checking it connects", state
     if event == "healthy":
@@ -259,8 +269,9 @@ def check_once(config, state, now, replace_now=False):
         due = now - state.get("pia_login_checked_at", 0) >= DAY_SECONDS
         return ("pia_login" if due and check_pia_login(config, state, now) else action), state
     if action == "capped":
-        log(f"Unhealthy ({detail}), but already replaced {len(state['replacements'])} time(s) "
-            f"in the last 24h (max {config['max_replacements_per_day']}). Not replacing again.")
+        log(f"Unhealthy ({detail}). The last {state.get('failed_replacements', 0)} replacements didn't stay connected "
+            f"for {config['stable_connection_minutes']} minutes, so this may be more than one bad server. "
+            f"Trying a new one every {config['retry_minutes_after_failed_replacements']} minutes.")
         return "capped", state
 
     current_ip = endpoint_ip(client.get("wireguard_client_configuration_file")) or state.get("last_server_ip")
@@ -280,8 +291,11 @@ def check_once(config, state, now, replace_now=False):
     router_push.update_wireguard_client(
         opener, csrf, config["router_url"], client, conf, f"pia-{config['region_id']}.conf"
     )
-    state.update(unhealthy_checks=0, last_server_ip=server_ip, pia_login_checked_at=now)
-    state["replacements"] = state.get("replacements", []) + [now]
+    state.update(unhealthy_checks=0, last_server_ip=server_ip, pia_login_checked_at=now, last_replacement_at=now,
+                 failed_replacements=state.get("failed_replacements", 0) + 1)
+    state.pop("connected_since", None)
+    if server_ip == current_ip:
+        log(f"No other server in the region took the new key, so this reuses {server_ip}.")
     log(f"Replaced {config['client_name']!r} with a new {region_name} config on {server_ip} "
         f"(was {current_ip}). Unhealthy reason: {detail}")
     return "replaced", state
