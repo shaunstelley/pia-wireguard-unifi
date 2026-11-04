@@ -29,6 +29,7 @@ DEFAULTS = {
     "include_dns": True,
     "dry_run": True,
     "unhealthy_checks_before_replacing": 3,
+    "recheck_seconds": 60,
     "max_replacements_per_day": 4,
     "smtp_server": "smtp.gmail.com",
     "smtp_port": 465,
@@ -308,9 +309,12 @@ def main():
         return verify(config)
     state_path = Path(os.environ.get("STATE_DIRECTORY", ".")) / "state.json"
     state = load_state(state_path)
-    now = time.time()
     try:
-        event, state = check_once(config, state, now, replace_now=args.replace_now)
+        event, state = check_once(config, state, time.time(), replace_now=args.replace_now)
+        # After a failed check, don't wait for the timer to count the next ones.
+        while event == "waiting" and config["recheck_seconds"]:
+            time.sleep(config["recheck_seconds"])
+            event, state = check_once(config, state, time.time())
     except (router_push.RouterLoginError, router_push.RouterPushError) as e:
         log(describe_router_error(e))
         event = "router_error"
@@ -320,7 +324,7 @@ def main():
     except Exception:  # a bug, but the alert still has to go out
         log(f"Unexpected error:\n{traceback.format_exc()}")
         event = "error"
-    save_state(state_path, send_alert(config, state, event, now))
+    save_state(state_path, send_alert(config, state, event, time.time()))
     return 1 if event in FAILED else 0
 
 

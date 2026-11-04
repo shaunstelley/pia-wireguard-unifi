@@ -1,6 +1,6 @@
 # PIA watchdog
 
-Keeps your router's PIA WireGuard VPN client connected without you stepping in. Every 5 minutes it asks the router for the client's status, the same status the Network app shows. Anything other than **Connected** counts as a failed check. After 3 failed checks in a row, it generates a fresh config for the same PIA region (trying a different server in that region first) and swaps it into the **existing** router entry. Networks and devices you route through that client stay attached.
+Keeps your router's PIA WireGuard VPN client connected without you stepping in. Every 5 minutes it asks the router for the client's status, the same status the Network app shows. Anything other than **Connected** counts as a failed check, and it then re-checks every minute. After 3 failed checks in a row, about 2 minutes after the first, it generates a fresh config for the same PIA region (trying a different server in that region first) and swaps it into the **existing** router entry. Networks and devices you route through that client stay attached.
 
 It runs on an always-on Linux machine on the router's network, such as a Raspberry Pi with Raspberry Pi OS or Debian 12. It's not meant for the Mac.
 
@@ -106,7 +106,8 @@ The PIA password, router password, and email password (if alerts are on) are enc
 | `region_id` | PIA region to generate configs for (`watchdog/pia_watchdog.py --list-regions` lists them) |
 | `include_dns` | Use PIA's DNS server in the config (default `true`) |
 | `dry_run` | Log only, change nothing (default `true`) |
-| `unhealthy_checks_before_replacing` | Failed checks in a row before replacing (default `3`, i.e. 15 minutes) |
+| `unhealthy_checks_before_replacing` | Failed checks in a row before replacing (default `3`) |
+| `recheck_seconds` | Wait between checks after a failed one (default `60`); `0` waits for the 5-minute timer instead, about 15 minutes in all |
 | `max_replacements_per_day` | Safety cap; past it the service reports a failure instead of replacing again (default `4`) |
 | `alert_email` | Where to send [email alerts](#email-alerts); leave it out to turn them off |
 | `smtp_username` | The email account that sends them (default: `alert_email`) |

@@ -262,6 +262,49 @@ class MainTests(unittest.TestCase):
         with mock.patch.object(wd, "check_once", check_once):
             return wd.main()
 
+    def run_rechecks(self, *results, recheck_seconds=None):
+        if recheck_seconds is not None:
+            config_path = Path(sys.argv[2])
+            config_path.write_text(json.dumps({**json.loads(config_path.read_text()),
+                                               "recheck_seconds": recheck_seconds}))
+        check_once = mock.Mock(side_effect=results)
+        with mock.patch.object(wd.time, "sleep") as sleep:
+            code = self.run_main(check_once)
+        return code, check_once, [c.args[0] for c in sleep.call_args_list]
+
+    def test_a_failed_check_is_rechecked_until_it_replaces(self):
+        code, check_once, sleeps = self.run_rechecks(
+            ("waiting", {"unhealthy_checks": 1, "replacements": []}),
+            ("waiting", {"unhealthy_checks": 2, "replacements": []}),
+            ("replaced", {"unhealthy_checks": 0, "replacements": [NOW], "last_server_ip": "2.2.2.2"}))
+        self.assertEqual((code, check_once.call_count, sleeps), (0, 3, [60, 60]))
+        self.assertEqual(json.loads(self.state_path.read_text())["replacements"], [NOW])
+
+    def test_rechecking_stops_when_it_recovers(self):
+        code, check_once, sleeps = self.run_rechecks(
+            ("waiting", {"unhealthy_checks": 1, "replacements": []}),
+            ("healthy", {"unhealthy_checks": 0, "replacements": []}))
+        self.assertEqual((code, check_once.call_count, sleeps), (0, 2, [60]))
+        self.send_email.assert_not_called()
+
+    def test_a_healthy_check_never_rechecks(self):
+        _, check_once, sleeps = self.run_rechecks(("healthy", {"unhealthy_checks": 0, "replacements": []}))
+        self.assertEqual((check_once.call_count, sleeps), (1, []))
+
+    def test_zero_recheck_seconds_waits_for_the_timer(self):
+        _, check_once, sleeps = self.run_rechecks(
+            ("waiting", {"unhealthy_checks": 1, "replacements": []}), recheck_seconds=0)
+        self.assertEqual((check_once.call_count, sleeps), (1, []))
+        self.assertEqual(json.loads(self.state_path.read_text())["unhealthy_checks"], 1)
+
+    def test_an_error_while_rechecking_keeps_the_count(self):
+        code, _, _ = self.run_rechecks(
+            ("waiting", {"unhealthy_checks": 1, "replacements": []}),
+            ("waiting", {"unhealthy_checks": 2, "replacements": []}),
+            OSError("PIA unreachable"))
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(self.state_path.read_text())["unhealthy_checks"], 2)
+
     def test_an_unexpected_crash_still_alerts_and_fails_the_run(self):
         self.assertEqual(self.run_main(mock.Mock(side_effect=KeyError("surprise"))), 1)
         self.assertEqual(self.send_email.call_args.args[1], wd.ALERTS["error"])
