@@ -15,6 +15,7 @@ import socket
 import ssl
 import sys
 import time
+import traceback
 from email.message import EmailMessage
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -315,6 +316,9 @@ def main():
         event = "router_error"
     except (RuntimeError, OSError) as e:
         log(f"Error: {e}")
+        event = "error"
+    except Exception:  # a bug, but the alert still has to go out
+        log(f"Unexpected error:\n{traceback.format_exc()}")
         event = "error"
     save_state(state_path, send_alert(config, state, event, now))
     return 1 if event in FAILED else 0

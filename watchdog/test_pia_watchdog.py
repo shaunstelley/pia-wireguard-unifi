@@ -1,6 +1,9 @@
 """Run with: python3 -m unittest discover watchdog"""
 
+import io
+import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -240,6 +243,39 @@ class AlertTests(unittest.TestCase):
         self.assertEqual((msg["Subject"], msg["To"]), ("PIA watchdog: Test email", "me@example.com"))
 
 
+class MainTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.state_path = Path(tmp.name, "state.json")
+        config_path = Path(tmp.name, "config.json")
+        config_path.write_text(json.dumps({**CONFIG, "alert_email": "me@example.com"}))
+        self.send_email = mock.Mock()
+        for patcher in (mock.patch.dict(os.environ, {"STATE_DIRECTORY": tmp.name}),
+                        mock.patch.object(sys, "argv", ["pia_watchdog", "--config", str(config_path)]),
+                        mock.patch.object(wd, "send_email", self.send_email),
+                        mock.patch.object(wd, "log")):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def run_main(self, check_once):
+        with mock.patch.object(wd, "check_once", check_once):
+            return wd.main()
+
+    def test_an_unexpected_crash_still_alerts_and_fails_the_run(self):
+        self.assertEqual(self.run_main(mock.Mock(side_effect=KeyError("surprise"))), 1)
+        self.assertEqual(self.send_email.call_args.args[1], wd.ALERTS["error"])
+        self.assertEqual(json.loads(self.state_path.read_text())["alert"]["event"], "error")
+        self.assertIn("KeyError", wd.log.call_args.args[0])
+
+    def test_a_router_error_keeps_the_saved_state(self):
+        self.state_path.write_text(json.dumps({"unhealthy_checks": 2, "replacements": []}))
+        code = self.run_main(mock.Mock(side_effect=wd.router_push.RouterPushError("Unreadable reply")))
+        self.assertEqual(code, 1)
+        self.assertEqual(self.send_email.call_args.args[1], wd.ALERTS["router_error"])
+        self.assertEqual(json.loads(self.state_path.read_text())["unhealthy_checks"], 2)
+
+
 class RouterCallTests(unittest.TestCase):
     """Fake router responses shaped like the real ones captured from a Dream Router."""
     CLIENT_ID = "6adff10fb4f6b2b9a549482d"
@@ -248,6 +284,12 @@ class RouterCallTests(unittest.TestCase):
     def call(self, fn, responses, *args):
         with mock.patch.object(wd.router_push, "_authed_request", side_effect=responses) as req:
             return fn("opener", "csrf", "https://router", *args), req
+
+    def test_an_unreadable_reply_is_a_router_error(self):
+        opener = mock.Mock()
+        opener.open.return_value = io.BytesIO(b"<html>Starting up</html>")
+        with self.assertRaisesRegex(wd.router_push.RouterPushError, "Unreadable reply"):
+            wd.router_push._authed_request(opener, "csrf", "https://router/x")
 
     def test_health_reads_the_clients_status(self):
         client = {"_id": self.CLIENT_ID}
