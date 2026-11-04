@@ -166,7 +166,10 @@ def _authed_request(opener, csrf_token, url, method="GET", body=None, timeout=15
         raise RouterPushError(f"Request to {url} failed: {message}") from e
     except urllib.error.URLError as e:
         raise RouterPushError(f"Could not reach {url}: {e.reason}") from e
-    return json.loads(raw) if raw else {}
+    try:
+        return json.loads(raw) if raw else {}
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise RouterPushError(f"Unreadable reply from {url} (is the router restarting?)") from e
 
 
 def list_networks(opener, csrf_token, base_url, site="default", timeout=15):

@@ -1,6 +1,6 @@
 # PIA watchdog
 
-Keeps your router's PIA WireGuard VPN client connected without you stepping in. Every 5 minutes it asks the router for the client's status, the same status the Network app shows. Anything other than **Connected** counts as a failed check. After 3 failed checks in a row, it generates a fresh config for the same PIA region (trying a different server in that region first) and swaps it into the **existing** router entry. Networks and devices you route through that client stay attached.
+Keeps your router's PIA WireGuard VPN client connected without you stepping in. Every 5 minutes it asks the router for the client's status, the same status the Network app shows. Anything other than **Connected** counts as a failed check, and it then re-checks every minute. After 3 failed checks in a row, about 2 minutes after the first, it generates a fresh config for the same PIA region (trying a different server in that region first) and swaps it into the **existing** router entry. Networks and devices you route through that client stay attached.
 
 It runs on an always-on Linux machine on the router's network, such as a Raspberry Pi with Raspberry Pi OS or Debian 12. It's not meant for the Mac.
 
@@ -51,6 +51,34 @@ sudo /opt/pia-wireguard-unifi/watchdog/verify.sh
 
 The installer runs this at the end. The watchdog also re-checks the PIA login once a day, so a changed password shows up as a failed run in the logs well before an outage needs it.
 
+## Email alerts
+
+The installer can set up an email for whenever the watchdog does something or needs you:
+
+| When | Subject |
+|---|---|
+| It swaps in a new config | Switched the VPN to server *X*, checking it connects |
+| The next check sees it connected | VPN connected on server *X* |
+| It can't fix things: [new servers aren't helping](#when-new-servers-dont-help), the PIA login fails, the router can't be reached, the VPN client is missing | What's wrong, with that run's log |
+| A problem clears up | Resolved: *what was wrong* |
+| Dry-run mode only: the VPN is down and it would have replaced the config | VPN is down (dry run, so nothing was replaced) |
+
+Every alert ends with how often replacements have been needed: counts for the last 24 hours, 7 days, and 30 days, the time between the last two, and the average time between them. Replacements you run yourself with `replace-now.sh` aren't counted. Hourly retries are.
+
+A problem that lasts doesn't email on every 5-minute check: you get one email when it starts, a reminder every 6 hours (`alert_reminder_hours`), and a "Resolved" email when it's fixed.
+
+The emails go out through an email account's SMTP server, sent by the watchdog itself. With the [bypass network](#bypass-network) they still go out while the VPN is down. That's when you need them, and when anything else on a network routed through the VPN (Home Assistant, for example) is cut off too.
+
+To turn them on, re-run the installer and answer **y** to the email question. For Gmail:
+
+1. Your Google account needs 2-Step Verification on.
+2. Create an app password at <https://myaccount.google.com/apppasswords> (name it e.g. "PIA watchdog").
+3. Give the installer that 16-letter app password, not your normal password. It's encrypted like the other two.
+
+An app password can do anything with the mailbox, not just send. If you'd rather the Pi not hold the keys to your main inbox, create a separate Gmail account just for sending, and enter your own address as the one to send alerts to.
+
+The installer sends a test email at the end, and so does `verify.sh` whenever you run it. If the test email arrives but your phone doesn't notify you, check the mail app's notification settings for that inbox.
+
 ## Replace the config right now
 
 To swap in a fresh config immediately, whatever the current status (also a good way to test the whole thing once):
@@ -59,11 +87,17 @@ To swap in a fresh config immediately, whatever the current status (also a good 
 sudo /opt/pia-wireguard-unifi/watchdog/replace-now.sh
 ```
 
-This works even in dry-run mode. It isn't blocked by the daily limit, but it does count toward it.
+This works even in dry-run mode, and even when it has [stopped replacing](#when-new-servers-dont-help). It counts as a replacement that still has to prove itself.
+
+## When new servers don't help
+
+A new server that stays connected for 10 minutes counts as a success and clears the count, so a replacement that's needed days or hours later is never held back. One that doesn't connect, or drops sooner than that, counts as a failure.
+
+After 3 failures in a row, about 20 minutes in, this is likely more than one bad server. The watchdog emails you and slows down to one new server an hour, so it recovers by itself when the problem clears, without requesting new keys every few minutes. There's no limit on replacements that work, so if it's replacing a lot, the emails are how you'll know.
 
 ## How the passwords are stored
 
-The PIA password and router password are encrypted with `systemd-creds` and stored in `/etc/credstore.encrypted/`. The installer pipes them straight into the encryption, so they never touch disk in plaintext. They're decrypted only while the watchdog runs, into a private in-memory location that only the watchdog can read. The watchdog runs as its own system user (`pia-watchdog`), which has no login, no home folder, and no access to yours.
+The PIA password, router password, and email password (if alerts are on) are encrypted with `systemd-creds` and stored in `/etc/credstore.encrypted/`. The installer pipes them straight into the encryption, so they never touch disk in plaintext. They're decrypted only while the watchdog runs, into a private in-memory location that only the watchdog can read. The watchdog runs as its own system user (`pia-watchdog`), which has no login, no home folder, and no access to yours.
 
 **Limits:** a Pi has no hardware security chip, so the decryption key is on the same SD card. This protects against copies leaking (backups, a stray file, other users on the Pi). It doesn't protect against someone with the whole SD card or root on the Pi. Keep SSH key-only, and use a PIA password you don't use anywhere else.
 
@@ -80,8 +114,16 @@ The PIA password and router password are encrypted with `systemd-creds` and stor
 | `region_id` | PIA region to generate configs for (`watchdog/pia_watchdog.py --list-regions` lists them) |
 | `include_dns` | Use PIA's DNS server in the config (default `true`) |
 | `dry_run` | Log only, change nothing (default `true`) |
-| `unhealthy_checks_before_replacing` | Failed checks in a row before replacing (default `3`, i.e. 15 minutes) |
-| `max_replacements_per_day` | Safety cap; past it the service reports a failure instead of replacing again (default `4`) |
+| `unhealthy_checks_before_replacing` | Failed checks in a row before replacing (default `3`) |
+| `recheck_seconds` | Wait between checks after a failed one (default `60`); `0` waits for the 5-minute timer instead, about 15 minutes in all |
+| `max_failed_replacements` | Replacements in a row that don't hold before slowing down (default `3`) |
+| `stable_connection_minutes` | How long a connection must hold to count as a success (default `10`) |
+| `retry_minutes_after_failed_replacements` | Time between new servers once it has slowed down (default `60`) |
+| `alert_email` | Where to send [email alerts](#email-alerts); leave it out to turn them off |
+| `smtp_username` | The email account that sends them (default: `alert_email`) |
+| `smtp_server` | Its SMTP server (default `smtp.gmail.com`) |
+| `smtp_port` | `465` for TLS (default), or `587` for STARTTLS |
+| `alert_reminder_hours` | How often to repeat an alert while a problem lasts (default `6`) |
 
 ## Updating and removing
 

@@ -86,13 +86,14 @@ if [[ ! -f $CONF_DIR/config.json ]] || yes_no "Change the existing settings?" n;
   done
   if yes_no "Use PIA's DNS server" y; then dns=true; else dns=false; fi
   if yes_no "Start in dry-run mode (log what it would do, change nothing)" y; then dry=true; else dry=false; fi
-  jq -n \
+  jq -n --argjson old "$(cat "$CONF_DIR/config.json" 2>/dev/null || echo '{}')" \
     --arg router_url "$router_url" --arg router_username "$router_user" \
     --arg client_name "$client_name" --arg pia_username "$pia_user" --arg region_id "$region" \
     --argjson include_dns "$dns" --argjson dry_run "$dry" \
-    '{router_url: $router_url, router_username: $router_username, client_name: $client_name,
+    '$old + {router_url: $router_url, router_username: $router_username, client_name: $client_name,
       pia_username: $pia_username, region_id: $region_id, include_dns: $include_dns, dry_run: $dry_run}' \
-    > "$CONF_DIR/config.json"
+    > "$CONF_DIR/config.json.new"
+  mv "$CONF_DIR/config.json.new" "$CONF_DIR/config.json"
   echo "Saved settings to $CONF_DIR/config.json"
 fi
 
@@ -102,6 +103,45 @@ for name in pia_password router_password; do
     store_secret "$name" "$label"
   fi
 done
+
+# Email alerts go through an email account's SMTP server. The watchdog's
+# traffic uses the bypass network, so they still go out when the VPN is down.
+config_get() { jq -r "$1" "$CONF_DIR/config.json"; }
+config_set() {  # jq filter, then jq options
+  jq "${@:2}" "$1" "$CONF_DIR/config.json" > "$CONF_DIR/config.json.new"
+  mv "$CONF_DIR/config.json.new" "$CONF_DIR/config.json"
+}
+email=$(config_get '.alert_email // empty')
+if [[ -n $email ]]; then
+  echo "Email alerts go to $email."
+  question="Change email alerts?" default=n
+else
+  question="Email you when the watchdog replaces the config or something needs your attention?" default=y
+fi
+if yes_no "$question" "$default"; then
+  email=$(ask "Send alerts to (blank to turn them off)" "$email")
+  if [[ -n $email ]]; then
+    old_sender=$(config_get '.smtp_username // empty')
+    echo "Alerts are sent by logging in to an email account's SMTP server. For Gmail, use an app password"
+    echo "(https://myaccount.google.com/apppasswords), not your normal password."
+    sender=$(ask "Send from (the account that logs in)" "${old_sender:-$email}")
+    server=$(ask "SMTP server" "$(config_get '.smtp_server // "smtp.gmail.com"')")
+    port=
+    until [[ $port =~ ^[0-9]+$ ]]; do
+      port=$(ask "SMTP port (465, or 587 for STARTTLS)" "$(config_get '.smtp_port // 465')")
+    done
+    config_set '. + {alert_email: $email, smtp_username: $sender, smtp_server: $server, smtp_port: $port}' \
+      --arg email "$email" --arg sender "$sender" --arg server "$server" --argjson port "$port"
+    if [[ $sender != "$old_sender" || ! -f $CRED_DIR/pia-watchdog-smtp_password ]] ||
+       yes_no "Replace the stored email password?" n; then
+      store_secret smtp_password "Password for $sender"
+    fi
+  else
+    config_set 'del(.alert_email, .smtp_username, .smtp_server, .smtp_port)'
+    rm -f "$CRED_DIR/pia-watchdog-smtp_password"
+    echo "Email alerts are off."
+  fi
+fi
 
 current_vlan=$(nmcli -g vlan.id connection show "$BYPASS_CON" 2>/dev/null || true)
 if [[ -n $current_vlan ]]; then
@@ -117,12 +157,16 @@ else
   [[ -n $vlan ]] && { setup_bypass "$vlan" || true; }
 fi
 
-sed "s#@REPO_DIR@#$REPO_DIR#g" "$REPO_DIR/watchdog/systemd/pia-watchdog.service" > /etc/systemd/system/pia-watchdog.service
+# systemd won't start a service whose credential file is missing, and the
+# email password only exists while alerts are on.
+unit_edits=(-e "s#@REPO_DIR@#$REPO_DIR#g")
+[[ -f $CRED_DIR/pia-watchdog-smtp_password ]] || unit_edits+=(-e '/smtp_password/d')
+sed "${unit_edits[@]}" "$REPO_DIR/watchdog/systemd/pia-watchdog.service" > /etc/systemd/system/pia-watchdog.service
 cp "$REPO_DIR/watchdog/systemd/pia-watchdog.timer" /etc/systemd/system/pia-watchdog.timer
 systemctl daemon-reload
 systemctl enable --now pia-watchdog.timer >/dev/null
 
-echo "Checking the router and PIA logins..."
+echo "Checking the router and PIA logins${email:+, and sending a test email}..."
 if "$REPO_DIR/watchdog/verify.sh"; then
   echo
   echo "Installed. It checks every 5 minutes. Logs: journalctl -u pia-watchdog"
