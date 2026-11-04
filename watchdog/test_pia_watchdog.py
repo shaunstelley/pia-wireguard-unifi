@@ -59,9 +59,10 @@ class DecideTests(unittest.TestCase):
         _, state = wd.decide({**state, "unhealthy_checks": 0}, True, CONFIG, NOW + 11 * 60)
         self.assertEqual(state["failed_replacements"], 2)
 
-    def test_drops_the_old_daily_limits_record(self):
-        _, state = wd.decide({"unhealthy_checks": 0, "replacements": [NOW]}, True, CONFIG, NOW)
-        self.assertNotIn("replacements", state)
+    def test_keeps_30_days_of_replacement_history(self):
+        old, recent = NOW - 30 * wd.DAY_SECONDS, NOW - 29 * wd.DAY_SECONDS
+        _, state = wd.decide({"unhealthy_checks": 0, "replacements": [old, recent]}, True, CONFIG, NOW)
+        self.assertEqual(state["replacements"], [recent])
 
 
 class EndpointTests(unittest.TestCase):
@@ -144,6 +145,7 @@ class CheckOnceTests(unittest.TestCase):
             "opener", "csrf", "https://router", CLIENT, "NEW CONF", "pia-us_south_west.conf")
         self.assertEqual((state["failed_replacements"], state["last_replacement_at"], state["last_server_ip"]),
                          (1, NOW, "209.87.164.40"))
+        self.assertEqual(state["replacements"], [NOW])
 
     def test_logs_when_no_other_server_took_the_key(self):
         with mock.patch.object(wd.pia_config, "generate_conf", return_value=("NEW", "US Texas", "209.87.164.32")):
@@ -166,6 +168,7 @@ class CheckOnceTests(unittest.TestCase):
         with mock.patch.object(wd.pia_config, "generate_conf", return_value=("NEW", "US Texas", "2.2.2.2")):
             event, state = wd.check_once(CONFIG, {"unhealthy_checks": 0}, NOW, replace_now=True)
         self.assertEqual((event, state["last_replacement_at"]), ("replaced", NOW))
+        self.assertNotIn("replacements", state)  # a manual swap wasn't needed
         wd.router_push.wireguard_client_health.assert_not_called()
         wd.router_push.update_wireguard_client.assert_called_once()
 
@@ -260,6 +263,26 @@ class AlertTests(unittest.TestCase):
         self.assertEqual(self.plan(state, "replaced", NOW + 3600), (None, state))
         self.assertEqual(self.plan(state, "capped", NOW + 3700)[0], None)
         self.assertEqual(self.plan(state, "healthy", NOW + 4000)[0], "Resolved: " + wd.ALERTS["capped"])
+
+    def test_stats_with_no_replacements(self):
+        self.assertEqual(wd.replacement_stats({}, NOW),
+                         "Replacements needed: 0 in the last 24 hours, 0 in the last 7 days, 0 in the last 30 days.")
+
+    def test_stats_with_one_replacement_have_no_gaps(self):
+        self.assertEqual(wd.replacement_stats({"replacements": [NOW - 60]}, NOW),
+                         "Replacements needed: 1 in the last 24 hours, 1 in the last 7 days, 1 in the last 30 days.")
+
+    def test_stats_show_counts_and_gaps(self):
+        times = [NOW - 21 * wd.DAY_SECONDS, NOW - 3 * wd.DAY_SECONDS, NOW - 9 * 3600, NOW]
+        self.assertEqual(wd.replacement_stats({"replacements": times}, NOW),
+                         "Replacements needed: 2 in the last 24 hours, 3 in the last 7 days, 4 in the last 30 days.\n"
+                         "Time between the last two: 9 hours. Average time between them: 7 days.")
+
+    def test_alert_emails_end_with_the_stats(self):
+        with mock.patch.object(wd, "send_email") as send, mock.patch.object(wd, "run_log", ["Replaced it."]):
+            wd.send_alert(self.EMAIL_CONFIG, {"replacements": [NOW], "last_server_ip": "2.2.2.2"}, "replaced", NOW)
+        self.assertEqual(send.call_args.args[2], "Replaced it.\n\nReplacements needed: 1 in the last 24 hours, "
+                                                 "1 in the last 7 days, 1 in the last 30 days.")
 
     def test_alerts_are_off_without_an_address(self):
         with mock.patch.object(wd, "send_email") as send:

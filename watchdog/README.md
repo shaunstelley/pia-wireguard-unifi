@@ -63,6 +63,8 @@ The installer can set up an email for whenever the watchdog does something or ne
 | A problem clears up | Resolved: *what was wrong* |
 | Dry-run mode only: the VPN is down and it would have replaced the config | VPN is down (dry run, so nothing was replaced) |
 
+Every alert ends with how often replacements have been needed: counts for the last 24 hours, 7 days, and 30 days, the time between the last two, and the average time between them. Replacements you run yourself with `replace-now.sh` aren't counted. Hourly retries are.
+
 A problem that lasts doesn't email on every 5-minute check: you get one email when it starts, a reminder every 6 hours (`alert_reminder_hours`), and a "Resolved" email when it's fixed.
 
 The emails go out through an email account's SMTP server, sent by the watchdog itself. With the [bypass network](#bypass-network) they still go out while the VPN is down. That's when you need them, and when anything else on a network routed through the VPN (Home Assistant, for example) is cut off too.

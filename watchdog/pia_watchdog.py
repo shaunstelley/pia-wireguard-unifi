@@ -25,6 +25,7 @@ import pia_config  # noqa: E402
 import router_push  # noqa: E402
 
 DAY_SECONDS = 24 * 60 * 60
+HISTORY_DAYS = 30
 DEFAULTS = {
     "include_dns": True,
     "dry_run": True,
@@ -108,7 +109,7 @@ def decide(state, healthy, config, now):
     """Pure decision step: returns (action, state) with action one of
     "healthy", "waiting", "replace", "capped"."""
     state = dict(state)
-    state.pop("replacements", None)  # the old daily limit's record
+    state["replacements"] = [t for t in state.get("replacements", []) if now - t < HISTORY_DAYS * DAY_SECONDS]
     if healthy:
         state["unhealthy_checks"] = 0
         # A replacement only counts as having worked once it has held for a while.
@@ -175,6 +176,26 @@ def plan_alert(state, event, now, config):
     return ("Still: " if same else "") + ALERTS[event], state
 
 
+def describe_duration(seconds):
+    if seconds < 2 * 60 * 60:
+        return f"{round(seconds / 60)} minutes"
+    if seconds < 2 * DAY_SECONDS:
+        return f"{round(seconds / 3600)} hours"
+    return f"{round(seconds / DAY_SECONDS)} days"
+
+
+def replacement_stats(state, now):
+    """How often replacements have been needed, for the alert email. Manual ones aren't counted."""
+    times = sorted(state.get("replacements", []))
+    counts = [f"{sum(now - t < days * DAY_SECONDS for t in times)} in the last {label}"
+              for days, label in ((1, "24 hours"), (7, "7 days"), (HISTORY_DAYS, f"{HISTORY_DAYS} days"))]
+    lines = [f"Replacements needed: {', '.join(counts)}."]
+    if len(times) > 1:
+        lines.append(f"Time between the last two: {describe_duration(times[-1] - times[-2])}. "
+                     f"Average time between them: {describe_duration((times[-1] - times[0]) / (len(times) - 1))}.")
+    return "\n".join(lines)
+
+
 def send_email(config, subject, body):
     msg = EmailMessage()
     msg["Subject"] = f"PIA watchdog: {subject}"
@@ -204,7 +225,7 @@ def send_alert(config, state, event, now):
     if subject is None:
         return new_state
     try:
-        send_email(config, subject, "\n".join(run_log))
+        send_email(config, subject, "\n".join(run_log) + "\n\n" + replacement_stats(state, now))
     except (OSError, RuntimeError) as e:
         log(f"Couldn't send the alert email: {e}")
         return state
@@ -294,6 +315,8 @@ def check_once(config, state, now, replace_now=False):
     state.update(unhealthy_checks=0, last_server_ip=server_ip, pia_login_checked_at=now, last_replacement_at=now,
                  failed_replacements=state.get("failed_replacements", 0) + 1)
     state.pop("connected_since", None)
+    if not replace_now:
+        state["replacements"] = state.get("replacements", []) + [now]
     if server_ip == current_ip:
         log(f"No other server in the region took the new key, so this reuses {server_ip}.")
     log(f"Replaced {config['client_name']!r} with a new {region_name} config on {server_ip} "
