@@ -254,9 +254,9 @@ class AlertTests(unittest.TestCase):
 
     def test_a_replacement_emails_then_confirms(self):
         subject, state = self.plan({"last_server_ip": "2.2.2.2"}, "replaced")
-        self.assertIn("2.2.2.2", subject)
+        self.assertIsNone(subject)
         self.assertEqual(self.plan(state, "waiting", NOW + 300), (None, state))
-        self.assertEqual(self.plan(state, "healthy", NOW + 300)[0], "VPN connected on server 2.2.2.2")
+        self.assertEqual(self.plan(state, "healthy", NOW + 300)[0], "VPN reconnected on server 2.2.2.2")
 
     def test_slow_retries_during_a_known_outage_dont_email(self):
         _, state = self.plan({"last_server_ip": "2.2.2.2"}, "capped")
@@ -280,9 +280,47 @@ class AlertTests(unittest.TestCase):
 
     def test_alert_emails_end_with_the_stats(self):
         with mock.patch.object(wd, "send_email") as send, mock.patch.object(wd, "run_log", ["Replaced it."]):
-            wd.send_alert(self.EMAIL_CONFIG, {"replacements": [NOW], "last_server_ip": "2.2.2.2"}, "replaced", NOW)
+            wd.send_alert(self.EMAIL_CONFIG, {"replacements": [NOW]}, "capped", NOW)
         self.assertEqual(send.call_args.args[2], "Replaced it.\n\nReplacements needed: 1 in the last 24 hours, "
                                                  "1 in the last 7 days, 1 in the last 30 days.")
+
+    def alert_run(self, state, event, *messages):
+        with mock.patch.object(wd, "send_email") as send, mock.patch.object(wd, "run_log", list(messages)):
+            return wd.send_alert(self.EMAIL_CONFIG, state, event, NOW), send
+
+    def test_a_replacement_that_reconnects_sends_one_email(self):
+        state, send = self.alert_run({"last_server_ip": "2.2.2.2"}, "replaced", "Unhealthy (2/3).", "Replaced it.")
+        send.assert_not_called()
+        state, send = self.alert_run(state, "healthy", "Healthy.")
+        send.assert_called_once()
+        self.assertEqual(send.call_args.args[1], "VPN reconnected on server 2.2.2.2")
+        self.assertTrue(send.call_args.args[2].startswith("Unhealthy (2/3).\nReplaced it.\nHealthy.\n\n"))
+        self.assertNotIn("alert", state)
+        _, send = self.alert_run(state, "healthy", "Healthy.")
+        send.assert_not_called()
+
+    def test_replacements_that_fail_are_listed_in_the_one_email(self):
+        state, _ = self.alert_run({"last_server_ip": "2.2.2.2"}, "replaced", "Replaced with A.")
+        state, _ = self.alert_run(state, "waiting", "Unhealthy (1/3).")
+        state, send = self.alert_run(state, "replaced", "Replaced with B.")
+        send.assert_not_called()
+        state, send = self.alert_run(state, "capped", "Not fixing it.")
+        send.assert_called_once()
+        self.assertEqual(send.call_args.args[1], wd.ALERTS["capped"])
+        self.assertTrue(send.call_args.args[2].startswith("Replaced with A.\nReplaced with B.\nNot fixing it.\n\n"))
+
+    def test_a_reconnect_email_that_fails_is_retried_with_its_details(self):
+        state, _ = self.alert_run({"last_server_ip": "2.2.2.2"}, "replaced", "Replaced it.")
+        with mock.patch.object(wd, "send_email", side_effect=OSError("refused")), mock.patch.object(wd, "log"):
+            after = wd.send_alert(self.EMAIL_CONFIG, state, "healthy", NOW)
+        self.assertEqual(after, state)
+        _, send = self.alert_run(after, "healthy", "Healthy.")
+        self.assertTrue(send.call_args.args[2].startswith("Replaced it.\nHealthy.\n\n"))
+
+    def test_a_pending_alert_saved_before_this_change_still_closes(self):
+        old = {"last_server_ip": "2.2.2.2", "alert": {"event": "replaced", "since": NOW, "sent_at": NOW}}
+        _, send = self.alert_run(old, "healthy", "Healthy.")
+        self.assertEqual(send.call_args.args[1], "VPN reconnected on server 2.2.2.2")
 
     def test_alerts_are_off_without_an_address(self):
         with mock.patch.object(wd, "send_email") as send:

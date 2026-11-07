@@ -147,22 +147,24 @@ def check_pia_login(config, state, now):
     return 0
 
 
-def plan_alert(state, event, now, config):
+def plan_alert(state, event, now, config, messages=()):
     """Pure decision step: returns (email subject or None, state). state["alert"]
-    is the open alert the user was last emailed about."""
+    is the open alert: what the user was last emailed about, or replacements
+    still waiting to prove themselves, with their messages for the next email."""
     state = dict(state)
     alert = state.pop("alert", None)
     if event == "replaced":
         if alert and alert["event"] == "capped":  # a slow retry during an outage they know about
             state["alert"] = alert
             return None, state
-        state["alert"] = {"event": event, "since": now, "sent_at": now}
-        return f"Switched the VPN to server {state['last_server_ip']}, checking it connects", state
+        pending = alert.get("log", []) if alert and alert["event"] == "replaced" else []
+        state["alert"] = {"event": event, "since": now, "sent_at": now, "log": pending + list(messages)}
+        return None, state  # the next check decides what to say
     if event == "healthy":
         if alert is None:
             return None, state
         if alert["event"] == "replaced":
-            return f"VPN connected on server {state.get('last_server_ip')}", state
+            return f"VPN reconnected on server {state.get('last_server_ip')}", state
         return f"Resolved: {ALERTS[alert['event']]}", state
     if event not in ALERTS:  # waiting: give it a few more checks
         if alert:
@@ -221,11 +223,12 @@ def send_alert(config, state, event, now):
     email fails, the old one, so the next run tries again."""
     if not config.get("alert_email"):
         return state
-    subject, new_state = plan_alert(state, event, now, config)
+    subject, new_state = plan_alert(state, event, now, config, run_log)
     if subject is None:
         return new_state
+    messages = state.get("alert", {}).get("log", []) + run_log
     try:
-        send_email(config, subject, "\n".join(run_log) + "\n\n" + replacement_stats(state, now))
+        send_email(config, subject, "\n".join(messages) + "\n\n" + replacement_stats(state, now))
     except (OSError, RuntimeError) as e:
         log(f"Couldn't send the alert email: {e}")
         return state
