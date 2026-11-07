@@ -57,11 +57,12 @@ The installer can set up an email for whenever the watchdog does something or ne
 
 | When | Subject |
 |---|---|
-| It swaps in a new config | Switched the VPN to server *X*, checking it connects |
-| The next check sees it connected | VPN connected on server *X* |
+| A new config connects | VPN reconnected on server *X*, with what went wrong and what it replaced |
 | It can't fix things: [new servers aren't helping](#when-new-servers-dont-help), the PIA login fails, the router can't be reached, the VPN client is missing | What's wrong, with that run's log |
 | A problem clears up | Resolved: *what was wrong* |
 | Dry-run mode only: the VPN is down and it would have replaced the config | VPN is down (dry run, so nothing was replaced) |
+
+A replacement doesn't email by itself. The next check, up to about 5 minutes later, decides what to say, so a fix that works sends one email. If new servers keep failing, you hear nothing until the [3rd failure](#when-new-servers-dont-help), about 20 minutes in, and that email lists each attempt.
 
 Every alert ends with how often replacements have been needed: counts for the last 24 hours, 7 days, and 30 days, the time between the last two, and the average time between them. Replacements you run yourself with `replace-now.sh` aren't counted. Hourly retries are.
 
