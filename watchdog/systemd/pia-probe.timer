@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the traffic probe every 30 seconds
+
+[Timer]
+OnActiveSec=10s
+OnBootSec=1min
+OnUnitActiveSec=30s
+# The default accuracy (1 minute) would merge runs into one a minute.
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

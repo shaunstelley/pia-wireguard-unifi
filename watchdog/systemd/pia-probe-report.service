@@ -1,0 +1,31 @@
+[Unit]
+Description=Email the traffic probe's results, then switch the probe off
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 @REPO_DIR@/watchdog/probe_report.py --config /etc/pia-watchdog/config.json
+# "+" runs this one step as root, to stop the probe once the report is out.
+ExecStartPost=+/bin/systemctl disable --now pia-probe.timer
+# If the email fails, try again later; the probe keeps running until it goes out.
+Restart=on-failure
+RestartSec=30min
+# The watchdog's user, so the email goes out through the bypass network even if the VPN is down.
+User=pia-watchdog
+Group=pia-watchdog
+# To read the watchdog's router checks from the journal.
+SupplementaryGroups=systemd-journal
+# smtp_password exists only while email alerts are on; probe-install.sh drops both lines otherwise.
+LoadCredentialEncrypted=smtp_password:/etc/credstore.encrypted/pia-watchdog-smtp_password
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes

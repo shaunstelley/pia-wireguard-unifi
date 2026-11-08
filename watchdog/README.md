@@ -129,6 +129,30 @@ The PIA password, router password, and email password (if alerts are on) are enc
 | `alert_reminder_hours` | How often to repeat an alert while a problem lasts (default `6`) |
 | `router_errors_before_alert` | Failed router checks in a row before emailing (default `2`, so a router restart that's over by the next check sends nothing) |
 
+## Traffic probe
+
+An experiment, in log-only mode: it never changes the router or triggers the watchdog. It answers whether checking real traffic would catch outages sooner than asking the router every 5 minutes.
+
+Every 30 seconds it makes an HTTPS request to Cloudflare (`1.1.1.1`), and to Google only if that fails, over this machine's normal route through the VPN. It runs as its own user, `pia-probe`, because the watchdog's user takes the bypass network. Both sites failing counts as an outage. It writes `/var/lib/pia-probe/probe.json` on every run, and logs only when traffic stops or starts again.
+
+When its time is up, it emails a report and switches itself off. The report lists each outage, what the watchdog's router checks showed during it, and any gaps where the probe didn't run, such as a frozen machine.
+
+```bash
+sudo /opt/pia-wireguard-unifi/watchdog/probe-install.sh        # run for 2 days (or pass a number of days)
+sudo /opt/pia-wireguard-unifi/watchdog/probe-install.sh --remove
+```
+
+Preview the report at any time:
+
+```bash
+sudo python3 /opt/pia-wireguard-unifi/watchdog/probe_report.py --config /etc/pia-watchdog/config.json --dry-run
+```
+
+**Limits:**
+- The watchdog's checks come from the journal, which this machine keeps in memory, so a restart erases the earlier ones. The report says when that happened.
+- It only tests IPv4.
+- It costs about 0.34 s of CPU per run on a Raspberry Pi 4, about 16 minutes a day (around 1% of one core), plus about 12 KB of traffic per run.
+
 ## Updating and removing
 
 ```bash
