@@ -37,6 +37,7 @@ DEFAULTS = {
     "smtp_server": "smtp.gmail.com",
     "smtp_port": 465,
     "alert_reminder_hours": 6,
+    "router_errors_before_alert": 2,
 }
 
 # Run results worth an email, with their subjects. Each one opens an alert
@@ -166,7 +167,9 @@ def plan_alert(state, event, now, config, messages=()):
         if alert["event"] == "replaced":
             return f"VPN reconnected on server {state.get('last_server_ip')}", state
         return f"Resolved: {ALERTS[alert['event']]}", state
-    if event not in ALERTS:  # waiting: give it a few more checks
+    # A single router error is usually the router restarting, so wait for the next check.
+    early_router_error = event == "router_error" and state.get("router_errors", 0) < config["router_errors_before_alert"]
+    if event not in ALERTS or early_router_error:  # waiting: give it a few more checks
         if alert:
             state["alert"] = alert
         return None, state
@@ -364,6 +367,11 @@ def main():
     except Exception:  # a bug, but the alert still has to go out
         log(f"Unexpected error:\n{traceback.format_exc()}")
         event = "error"
+    state = dict(state)
+    if event == "router_error":
+        state["router_errors"] = state.get("router_errors", 0) + 1
+    else:
+        state.pop("router_errors", None)
     save_state(state_path, send_alert(config, state, event, time.time()))
     return 1 if event in FAILED else 0
 

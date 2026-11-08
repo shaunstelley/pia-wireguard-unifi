@@ -420,8 +420,25 @@ class MainTests(unittest.TestCase):
         self.state_path.write_text(json.dumps({"unhealthy_checks": 2}))
         code = self.run_main(mock.Mock(side_effect=wd.router_push.RouterPushError("Unreadable reply")))
         self.assertEqual(code, 1)
-        self.assertEqual(self.send_email.call_args.args[1], wd.ALERTS["router_error"])
         self.assertEqual(json.loads(self.state_path.read_text())["unhealthy_checks"], 2)
+
+    def test_a_router_error_emails_only_if_the_next_check_fails_too(self):
+        router_down = mock.Mock(side_effect=wd.router_push.RouterLoginError("Could not reach router"))
+        self.run_main(router_down)
+        self.send_email.assert_not_called()
+        self.assertEqual(json.loads(self.state_path.read_text())["router_errors"], 1)
+        self.run_main(router_down)
+        self.assertEqual(self.send_email.call_args.args[1], wd.ALERTS["router_error"])
+        self.send_email.reset_mock()
+        self.run_main(mock.Mock(side_effect=lambda config, state, now, **kw: ("healthy", state)))
+        self.assertEqual(self.send_email.call_args.args[1], "Resolved: " + wd.ALERTS["router_error"])
+        self.assertNotIn("router_errors", json.loads(self.state_path.read_text()))
+
+    def test_a_router_restart_between_checks_sends_nothing(self):
+        self.run_main(mock.Mock(side_effect=wd.router_push.RouterLoginError("Connection refused")))
+        self.run_main(mock.Mock(side_effect=lambda config, state, now, **kw: ("healthy", state)))
+        self.send_email.assert_not_called()
+        self.assertNotIn("router_errors", json.loads(self.state_path.read_text()))
 
 
 class RouterCallTests(unittest.TestCase):
