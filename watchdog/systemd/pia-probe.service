@@ -1,0 +1,23 @@
+[Unit]
+Description=Log-only check that internet traffic gets through the VPN
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 @REPO_DIR@/watchdog/traffic_probe.py
+# Its own user, not pia-watchdog: that user's traffic takes the bypass network and wouldn't test the VPN.
+User=pia-probe
+Group=pia-probe
+StateDirectory=pia-probe
+# Readable by pia-watchdog, which sends the report.
+StateDirectoryMode=0755
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes

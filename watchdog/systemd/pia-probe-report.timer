@@ -1,0 +1,10 @@
+[Unit]
+Description=Send the traffic probe's report once its time is up
+
+[Timer]
+OnCalendar=@REPORT_AT@
+# If the machine was off at that time, send it once it's back.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
