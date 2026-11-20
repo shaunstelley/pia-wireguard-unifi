@@ -1,6 +1,6 @@
 # Local web UI
 
-Generates a PIA WireGuard config and adds it to a UniFi router (tested on a Dream Router) as a WireGuard VPN client, optionally routing chosen networks or devices through it.
+Generates a PIA WireGuard config you can download and use with anything that imports WireGuard configs. Optionally, it also adds the config to a UniFi router (tested on a Dream Router) as a VPN client, and routes chosen networks or devices through it.
 
 ## Setup (macOS)
 

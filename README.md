@@ -1,15 +1,24 @@
-# PIA WireGuard → UniFi
+# PIA WireGuard config generator, with UniFi support
 
-Generate a [Private Internet Access](https://www.privateinternetaccess.com/) WireGuard config and add it to a UniFi router as a VPN client, all from a small web page running on your Mac. You can also pick which networks or devices on your router send their traffic through it. Tested with a UniFi Dream Router on macOS.
+Generate a [Private Internet Access](https://www.privateinternetaccess.com/) WireGuard config from a small web page on your Mac, and download it as a `.conf` file. Anything that imports a standard WireGuard config can use it: a router running OpenWrt, pfSense, OPNsense, or GL.iNet firmware, the WireGuard app on a phone or computer, or a device PIA's own app doesn't run on.
 
-This is a fork of PIA's [manual-connections](https://github.com/pia-foss/manual-connections) scripts. PIA's scripts still generate the WireGuard config. This fork adds a web UI on top and sends the result to the router through the same API the UniFi Network app itself uses.
+If you have a UniFi router, the same page can also add the config to it as a VPN client, and pick which networks or devices send their traffic through it.
+
+This is a fork of PIA's [manual-connections](https://github.com/pia-foss/manual-connections) scripts. Those are command-line scripts, mainly for connecting a Linux machine to PIA. They can write a config instead of connecting (`PIA_CONNECT=false`), but they don't give you a file to download. This fork puts a web page on top. PIA's scripts still generate the config.
 
 ## Quick start (macOS)
 
     brew install jq wireguard-tools
     git clone https://github.com/shaunstelley/pia-wireguard-unifi.git
 
-Then double-click `launch-webui.command` in the cloned folder and follow the three steps on the page: generate a config, connect to your router, add it. [webui/README.md](webui/README.md) has the details, including the recommended local-only router account that avoids Ubiquiti's emailed login codes.
+Then double-click `launch-webui.command` in the cloned folder. On the page:
+
+1. **Generate config**: log in to PIA, pick a region, and optionally test the config on your Mac. Then click **Download .conf**. For anything other than a UniFi router, you're done: import that file.
+2. **Connect to router** and 3. **Add to router**: only for a UniFi router. They add the config as a VPN client, sending it through the same API the UniFi Network app uses.
+
+[webui/README.md](webui/README.md) has the details, including the recommended local-only router account that avoids Ubiquiti's emailed login codes.
+
+**Configs don't last forever.** In testing, a config kept connecting for anywhere from about 9 hours to 7 days before it had to be replaced. When one stops connecting, generate a new one. On a UniFi router, the optional [watchdog](watchdog/README.md) does that automatically.
 
 ## What it's been tested on
 
@@ -17,16 +26,16 @@ One setup so far, so expect differences elsewhere:
 
 | Part | Tested on |
 |---|---|
-| Router | UniFi Dream Router (UDR), UniFi OS with the Network app, autumn 2026 |
-| Web UI | macOS with Safari and Chrome |
+| Config generator (web UI) | macOS with Safari and Chrome. Not tried on Linux, where everything except the Mac-only test step and launcher should work |
+| UniFi router (steps 2 and 3) | UniFi Dream Router (UDR), UniFi OS with the Network app, autumn 2026 |
 | Watchdog | Raspberry Pi 4 with Debian 12 (Raspberry Pi OS), systemd 252, NetworkManager 1.42 |
 | VPN | Private Internet Access WireGuard, US regions |
 
-Ubiquiti doesn't document the router API this uses. The requests were worked out from the Network app's own traffic, recorded in the browser, so another UniFi model or a later firmware may answer differently. If something fails, the browser's developer tools on the Network app show what it sends now. Issues and pull requests with what you find are welcome.
+The generated config is a standard WireGuard file. The UniFi steps are less certain: Ubiquiti doesn't document the router API they use. The requests were worked out from the Network app's own traffic, recorded in the browser, so another UniFi model or a later firmware may answer differently. If something fails, the browser's developer tools on the Network app show what it sends now. Issues and pull requests with what you find are welcome.
 
 ## What this fork changes
 
-- **`webui/`**: the local web UI.
+- **`webui/`**: the local web UI: generate and download a config, and optionally add it to a UniFi router.
 - **`launch-webui.command`**: a double-click launcher for it.
 - **`watchdog/`**: an optional background job for an always-on machine like a Raspberry Pi. It replaces the router's PIA config automatically when the connection fails. See [watchdog/README.md](watchdog/README.md).
 - **Two fixes to PIA's scripts:**
