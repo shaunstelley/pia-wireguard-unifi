@@ -434,6 +434,12 @@ class MainTests(unittest.TestCase):
         self.assertEqual(self.send_email.call_args.args[1], "Resolved: " + wd.ALERTS["router_error"])
         self.assertNotIn("router_errors", json.loads(self.state_path.read_text()))
 
+    def test_a_single_router_timeout_sends_nothing(self):
+        stalled = wd.router_push.RouterPushError("No reply from https://router/x within 15 s")
+        self.assertEqual(self.run_main(mock.Mock(side_effect=stalled)), 1)
+        self.run_main(mock.Mock(side_effect=lambda config, state, now, **kw: ("healthy", state)))
+        self.send_email.assert_not_called()
+
     def test_a_router_restart_between_checks_sends_nothing(self):
         self.run_main(mock.Mock(side_effect=wd.router_push.RouterLoginError("Connection refused")))
         self.run_main(mock.Mock(side_effect=lambda config, state, now, **kw: ("healthy", state)))
@@ -449,6 +455,17 @@ class RouterCallTests(unittest.TestCase):
     def call(self, fn, responses, *args):
         with mock.patch.object(wd.router_push, "_authed_request", side_effect=responses) as req:
             return fn("opener", "csrf", "https://router", *args), req
+
+    def test_a_router_that_stops_answering_is_a_router_error(self):
+        opener = mock.Mock()
+        opener.open.return_value.__enter__ = mock.Mock(side_effect=TimeoutError("The read operation timed out"))
+        opener.open.return_value.__exit__ = mock.Mock(return_value=False)
+        with self.assertRaisesRegex(wd.router_push.RouterPushError, "No reply from https://router/x within 15 s"):
+            wd.router_push._authed_request(opener, "csrf", "https://router/x")
+        opener.open.side_effect = TimeoutError("The read operation timed out")
+        with mock.patch.object(wd.router_push.urllib.request, "build_opener", return_value=opener), \
+             self.assertRaisesRegex(wd.router_push.RouterLoginError, "No reply from router at https://router within 10 s"):
+            wd.router_push.login("https://router", "watchdog", "secret")
 
     def test_an_unreadable_reply_is_a_router_error(self):
         opener = mock.Mock()

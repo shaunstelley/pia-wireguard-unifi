@@ -66,7 +66,7 @@ A replacement doesn't email by itself. The next check, up to about 5 minutes lat
 
 Every alert ends with how often replacements have been needed: counts for the last 24 hours, 7 days, and 30 days, the time between the last two, and the average time between them. Replacements you run yourself with `replace-now.sh` aren't counted. Hourly retries are.
 
-A router that can't be reached only emails if the next check, about 5 minutes later, fails too. A router restart (on 2026-11-08 the router went offline at about 06:44 GMT and was back by 06:52) usually clears up in that time, and then nothing is sent.
+A router that can't be reached, or doesn't answer within 15 seconds, only emails if the next check, about 5 minutes later, fails too. A router restart (on 2026-11-08 the router went offline at about 06:44 GMT and was back by 06:52) usually clears up in that time, and then nothing is sent.
 
 A problem that lasts doesn't email on every 5-minute check: you get one email when it starts, a reminder every 6 hours (`alert_reminder_hours`), and a "Resolved" email when it's fixed.
 

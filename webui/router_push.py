@@ -21,6 +21,7 @@ github.com/tmcpro/unifi-network-api spec this was first based on:
 
 import http.cookiejar
 import json
+import socket
 import ssl
 import urllib.error
 import urllib.request
@@ -84,6 +85,10 @@ def login(base_url, username, password, mfa_token="", verify_tls=False, timeout=
         pass
     except urllib.error.URLError as e:
         raise RouterLoginError(f"Could not reach router at {base_url}: {e.reason}") from e
+    # urllib only wraps timeouts while sending, not while waiting for the reply.
+    # socket.timeout is TimeoutError from Python 3.10; the Mac's 3.9 needs it named.
+    except (TimeoutError, socket.timeout) as e:
+        raise RouterLoginError(f"No reply from router at {base_url} within {timeout} s") from e
 
     body = json.dumps(
         {
@@ -120,6 +125,10 @@ def login(base_url, username, password, mfa_token="", verify_tls=False, timeout=
         raise RouterLoginError(f"Login failed: {message}") from e
     except urllib.error.URLError as e:
         raise RouterLoginError(f"Could not reach router at {base_url}: {e.reason}") from e
+    # urllib only wraps timeouts while sending, not while waiting for the reply.
+    # socket.timeout is TimeoutError from Python 3.10; the Mac's 3.9 needs it named.
+    except (TimeoutError, socket.timeout) as e:
+        raise RouterLoginError(f"No reply from router at {base_url} within {timeout} s") from e
 
     if status != 200:
         raise RouterLoginError(f"Login failed: HTTP {status}")
@@ -166,6 +175,10 @@ def _authed_request(opener, csrf_token, url, method="GET", body=None, timeout=15
         raise RouterPushError(f"Request to {url} failed: {message}") from e
     except urllib.error.URLError as e:
         raise RouterPushError(f"Could not reach {url}: {e.reason}") from e
+    # urllib only wraps timeouts while sending, not while waiting for the reply.
+    # socket.timeout is TimeoutError from Python 3.10; the Mac's 3.9 needs it named.
+    except (TimeoutError, socket.timeout) as e:
+        raise RouterPushError(f"No reply from {url} within {timeout} s") from e
     try:
         return json.loads(raw) if raw else {}
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
