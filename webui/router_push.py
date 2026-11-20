@@ -20,6 +20,7 @@ github.com/tmcpro/unifi-network-api spec this was first based on:
 """
 
 import http.cookiejar
+import ipaddress
 import json
 import socket
 import ssl
@@ -264,18 +265,24 @@ def routes_through_client(opener, csrf_token, base_url, client, device_ip, site=
                for t in r.get("target_devices", [])]
     if not targets:
         return False
+    # The network comes from the address itself, not the router's client list:
+    # that lists a machine on two networks (like one with a bypass VLAN) only
+    # once, and its entry can pair one network's address with the other network.
+    networks = _authed_request(opener, csrf_token, f"{base_url}/proxy/network/api/s/{site}/rest/networkconf")
+    address = ipaddress.ip_address(device_ip)
+    my_network = next((n["_id"] for n in networks.get("data", [])
+                       if n.get("ip_subnet") and address in ipaddress.ip_network(n["ip_subnet"], strict=False)), None)
+    if any(t.get("type") == "NETWORK" and t.get("network_id") == my_network for t in targets):
+        return True
+    macs = {t.get("client_mac") for t in targets if t.get("type") == "CLIENT"}
+    if not macs:
+        return False
     devices = _authed_request(
         opener, csrf_token,
         f"{base_url}/proxy/network/v2/api/site/{site}/clients/active?includeTrafficUsage=true&includeUnifiDevices=true",
     )
     me = next((d for d in devices if d.get("ip") == device_ip), None)
-    if me is None:
-        return False
-    return any(
-        (t.get("type") == "CLIENT" and t.get("client_mac") == me.get("mac"))
-        or (t.get("type") == "NETWORK" and t.get("network_id") == me.get("network_id"))
-        for t in targets
-    )
+    return me is not None and me.get("mac") in macs
 
 
 def list_devices(opener, csrf_token, base_url, site="default", timeout=15):
