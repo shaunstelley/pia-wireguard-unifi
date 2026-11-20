@@ -11,6 +11,19 @@ This is a fork of PIA's [manual-connections](https://github.com/pia-foss/manual-
 
 Then double-click `launch-webui.command` in the cloned folder and follow the three steps on the page: generate a config, connect to your router, add it. [webui/README.md](webui/README.md) has the details, including the recommended local-only router account that avoids Ubiquiti's emailed login codes.
 
+## What it's been tested on
+
+One setup so far, so expect differences elsewhere:
+
+| Part | Tested on |
+|---|---|
+| Router | UniFi Dream Router (UDR), UniFi OS with the Network app, autumn 2026 |
+| Web UI | macOS with Safari and Chrome |
+| Watchdog | Raspberry Pi 4 with Debian 12 (Raspberry Pi OS), systemd 252, NetworkManager 1.42 |
+| VPN | Private Internet Access WireGuard, US regions |
+
+Ubiquiti doesn't document the router API this uses. The requests were worked out from the Network app's own traffic, recorded in the browser, so another UniFi model or a later firmware may answer differently. If something fails, the browser's developer tools on the Network app show what it sends now. Issues and pull requests with what you find are welcome.
+
 ## What this fork changes
 
 - **`webui/`**: the local web UI.

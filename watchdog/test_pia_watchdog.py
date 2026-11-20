@@ -12,9 +12,9 @@ from unittest import mock
 import pia_watchdog as wd
 
 CONFIG = {**wd.DEFAULTS, "router_url": "https://router", "router_username": "watchdog",
-          "client_name": "PIA US Texas", "pia_username": "p1234567", "region_id": "us_south_west"}
-CLIENT = {"_id": "abc", "name": "PIA US Texas",
-          "wireguard_client_configuration_file": "[Peer]\nEndpoint = 209.87.164.32:1337\n"}
+          "client_name": "PIA VPN", "pia_username": "p1234567", "region_id": "us_south_west"}
+CLIENT = {"_id": "abc", "name": "PIA VPN",
+          "wireguard_client_configuration_file": "[Peer]\nEndpoint = 203.0.113.32:1337\n"}
 NOW = 1_000_000.0
 
 
@@ -67,7 +67,7 @@ class DecideTests(unittest.TestCase):
 
 class EndpointTests(unittest.TestCase):
     def test_reads_the_server_ip(self):
-        self.assertEqual(wd.endpoint_ip(CLIENT["wireguard_client_configuration_file"]), "209.87.164.32")
+        self.assertEqual(wd.endpoint_ip(CLIENT["wireguard_client_configuration_file"]), "203.0.113.32")
         self.assertIsNone(wd.endpoint_ip(None))
 
 
@@ -115,7 +115,7 @@ class CheckOnceTests(unittest.TestCase):
         )
         self.rp.start()
         self.addCleanup(self.rp.stop)
-        patcher = mock.patch.multiple(wd, log=mock.DEFAULT, lan_ip_toward=mock.Mock(return_value="192.168.11.151"))
+        patcher = mock.patch.multiple(wd, log=mock.DEFAULT, lan_ip_toward=mock.Mock(return_value="192.168.1.20"))
         self.mocks = patcher.start()
         self.addCleanup(patcher.stop)
         token = mock.patch.object(wd.pia_config, "fetch_token", return_value="token")
@@ -137,20 +137,20 @@ class CheckOnceTests(unittest.TestCase):
     def test_replaces_avoiding_the_current_server(self):
         config = {**CONFIG, "dry_run": False}
         with mock.patch.object(wd.pia_config, "generate_conf",
-                               return_value=("NEW CONF", "US Texas", "209.87.164.40")) as generate:
+                               return_value=("NEW CONF", "US Texas", "203.0.113.40")) as generate:
             event, state = wd.check_once(config, {"unhealthy_checks": 2}, NOW)
         self.assertEqual(event, "replaced")
-        self.assertEqual(generate.call_args.kwargs["avoid_server_ip"], "209.87.164.32")
+        self.assertEqual(generate.call_args.kwargs["avoid_server_ip"], "203.0.113.32")
         wd.router_push.update_wireguard_client.assert_called_once_with(
             "opener", "csrf", "https://router", CLIENT, "NEW CONF", "pia-us_south_west.conf")
         self.assertEqual((state["failed_replacements"], state["last_replacement_at"], state["last_server_ip"]),
-                         (1, NOW, "209.87.164.40"))
+                         (1, NOW, "203.0.113.40"))
         self.assertEqual(state["replacements"], [NOW])
 
     def test_logs_when_no_other_server_took_the_key(self):
-        with mock.patch.object(wd.pia_config, "generate_conf", return_value=("NEW", "US Texas", "209.87.164.32")):
+        with mock.patch.object(wd.pia_config, "generate_conf", return_value=("NEW", "US Texas", "203.0.113.32")):
             wd.check_once({**CONFIG, "dry_run": False}, {"unhealthy_checks": 2}, NOW)
-        self.assertIn("reuses 209.87.164.32", self.logged())
+        self.assertIn("reuses 203.0.113.32", self.logged())
 
     def test_says_why_it_stopped_replacing(self):
         state = {"unhealthy_checks": 2, "failed_replacements": 3, "last_replacement_at": NOW - 60}
@@ -176,7 +176,7 @@ class CheckOnceTests(unittest.TestCase):
         wd.router_push.routes_through_client.return_value = True
         wd.router_push.wireguard_client_health.return_value = (True, "status CONNECTED")
         wd.check_once(CONFIG, {"unhealthy_checks": 0}, NOW)
-        self.assertIn("is routed through 'PIA US Texas'", self.logged())
+        self.assertIn("is routed through 'PIA VPN'", self.logged())
 
     def test_checks_the_pia_login_once_a_day_while_healthy(self):
         wd.router_push.wireguard_client_health.return_value = (True, "status CONNECTED")
@@ -449,8 +449,8 @@ class MainTests(unittest.TestCase):
 
 class RouterCallTests(unittest.TestCase):
     """Fake router responses shaped like the real ones captured from a Dream Router."""
-    CLIENT_ID = "6adff10fb4f6b2b9a549482d"
-    DEFAULT_NET = "6a87c0526b64167f50ec41b4"
+    CLIENT_ID = "65f000000000000000000001"
+    DEFAULT_NET = "65f000000000000000000002"
 
     def call(self, fn, responses, *args):
         with mock.patch.object(wd.router_push, "_authed_request", side_effect=responses) as req:
@@ -475,33 +475,33 @@ class RouterCallTests(unittest.TestCase):
 
     def test_health_reads_the_clients_status(self):
         client = {"_id": self.CLIENT_ID}
-        conn = {"network_id": self.CLIENT_ID, "status": "CONNECTED", "remote_ip": "209.87.164.34", "notes": []}
+        conn = {"network_id": self.CLIENT_ID, "status": "CONNECTED", "remote_ip": "203.0.113.34", "notes": []}
         (healthy, _), _ = self.call(wd.router_push.wireguard_client_health, [{"connections": [conn]}], client)
         self.assertTrue(healthy)
         (healthy, detail), _ = self.call(
             wd.router_push.wireguard_client_health, [{"connections": [{**conn, "status": "DISCONNECTED"}]}], client)
-        self.assertEqual((healthy, detail), (False, "status DISCONNECTED, server 209.87.164.34"))
+        self.assertEqual((healthy, detail), (False, "status DISCONNECTED, server 203.0.113.34"))
         (healthy, _), _ = self.call(wd.router_push.wireguard_client_health, [{"connections": []}], client)
         self.assertFalse(healthy)
 
     def test_update_puts_the_record_back_with_only_the_config_changed(self):
-        client = {"_id": self.CLIENT_ID, "name": "PIA US Texas", "wireguard_id": 4, "ip_subnet": "10.0.0.1/32",
+        client = {"_id": self.CLIENT_ID, "name": "PIA VPN", "wireguard_id": 4, "ip_subnet": "10.0.0.1/32",
                   "wireguard_client_configuration_file": "OLD", "wireguard_client_configuration_filename": "old.conf"}
         _, req = self.call(wd.router_push.update_wireguard_client, [{"meta": {"rc": "ok"}, "data": [{}]}],
                            client, "NEW", "pia-us_south_west.conf")
         url, body = req.call_args.args[2], req.call_args.kwargs["body"]
         self.assertTrue(url.endswith(f"/rest/networkconf/{self.CLIENT_ID}"))
         self.assertEqual(req.call_args.kwargs["method"], "PUT")
-        self.assertEqual(body, {"_id": self.CLIENT_ID, "name": "PIA US Texas", "wireguard_id": 4,
+        self.assertEqual(body, {"_id": self.CLIENT_ID, "name": "PIA VPN", "wireguard_id": 4,
                                 "wireguard_client_configuration_file": "NEW",
                                 "wireguard_client_configuration_filename": "pia-us_south_west.conf"})
 
-    BYPASS_NET = "6a8f00000000000000000002"
-    NETWORKS = {"data": [{"_id": DEFAULT_NET, "name": "Default", "ip_subnet": "192.168.11.1/24"},
-                         {"_id": BYPASS_NET, "name": "TinCan", "ip_subnet": "192.168.3.1/24"},
-                         {"_id": CLIENT_ID, "name": "PIA US Texas", "ip_subnet": "10.10.0.2/32"},
+    BYPASS_NET = "65f000000000000000000003"
+    NETWORKS = {"data": [{"_id": DEFAULT_NET, "name": "Default", "ip_subnet": "192.168.1.1/24"},
+                         {"_id": BYPASS_NET, "name": "Bypass", "ip_subnet": "192.168.50.1/24"},
+                         {"_id": CLIENT_ID, "name": "PIA VPN", "ip_subnet": "10.10.0.2/32"},
                          {"_id": "wan", "name": "Internet 1"}]}
-    PI_MAC = "e4:5f:01:7d:84:ca"
+    MY_MAC = "02:00:00:00:00:01"
 
     def routed(self, targets, ip, devices=()):
         routes = [{"enabled": True, "network_id": self.CLIENT_ID, "target_devices": targets}]
@@ -510,17 +510,17 @@ class RouterCallTests(unittest.TestCase):
         return routed
 
     def test_detects_a_network_routed_through_the_client(self):
-        self.assertTrue(self.routed([{"type": "NETWORK", "network_id": self.DEFAULT_NET}], "192.168.11.151"))
+        self.assertTrue(self.routed([{"type": "NETWORK", "network_id": self.DEFAULT_NET}], "192.168.1.20"))
 
     def test_a_bypass_address_isnt_routed_even_if_the_router_files_it_under_default(self):
-        # Seen 2026-11-15 to 17: the Pi's one client entry showed its TinCan address under Default.
-        mixed_up = [{"ip": "192.168.3.151", "mac": self.PI_MAC, "network_id": self.DEFAULT_NET}]
-        self.assertFalse(self.routed([{"type": "NETWORK", "network_id": self.DEFAULT_NET}], "192.168.3.151", mixed_up))
+        # The router lists a machine on two networks once; that entry can pair its bypass address with Default.
+        mixed_up = [{"ip": "192.168.50.20", "mac": self.MY_MAC, "network_id": self.DEFAULT_NET}]
+        self.assertFalse(self.routed([{"type": "NETWORK", "network_id": self.DEFAULT_NET}], "192.168.50.20", mixed_up))
 
     def test_detects_a_device_routed_by_its_own_address(self):
-        devices = [{"ip": "192.168.3.151", "mac": self.PI_MAC, "network_id": self.DEFAULT_NET}]
-        self.assertTrue(self.routed([{"type": "CLIENT", "client_mac": self.PI_MAC}], "192.168.3.151", devices))
-        self.assertFalse(self.routed([{"type": "CLIENT", "client_mac": "aa:bb:cc:dd:ee:ff"}], "192.168.3.151", devices))
+        devices = [{"ip": "192.168.50.20", "mac": self.MY_MAC, "network_id": self.DEFAULT_NET}]
+        self.assertTrue(self.routed([{"type": "CLIENT", "client_mac": self.MY_MAC}], "192.168.50.20", devices))
+        self.assertFalse(self.routed([{"type": "CLIENT", "client_mac": "aa:bb:cc:dd:ee:ff"}], "192.168.50.20", devices))
 
 
 if __name__ == "__main__":
