@@ -496,17 +496,31 @@ class RouterCallTests(unittest.TestCase):
                                 "wireguard_client_configuration_file": "NEW",
                                 "wireguard_client_configuration_filename": "pia-us_south_west.conf"})
 
-    def test_detects_a_device_routed_via_its_network(self):
-        routes = [{"enabled": True, "network_id": self.CLIENT_ID,
-                   "target_devices": [{"type": "NETWORK", "network_id": self.DEFAULT_NET}]}]
-        devices = [{"ip": "192.168.11.151", "mac": "e4:5f:01:7d:84:ca", "network_id": self.DEFAULT_NET}]
-        client = {"_id": self.CLIENT_ID}
-        routed, _ = self.call(wd.router_push.routes_through_client, [routes, devices], client, "192.168.11.151")
-        self.assertTrue(routed)
-        other_device = [{"type": "CLIENT", "client_mac": "aa:bb:cc:dd:ee:ff"}]
-        routed, _ = self.call(wd.router_push.routes_through_client,
-                              [[{**routes[0], "target_devices": other_device}], devices], client, "192.168.11.151")
-        self.assertFalse(routed)
+    BYPASS_NET = "6a8f00000000000000000002"
+    NETWORKS = {"data": [{"_id": DEFAULT_NET, "name": "Default", "ip_subnet": "192.168.11.1/24"},
+                         {"_id": BYPASS_NET, "name": "TinCan", "ip_subnet": "192.168.3.1/24"},
+                         {"_id": CLIENT_ID, "name": "PIA US Texas", "ip_subnet": "10.10.0.2/32"},
+                         {"_id": "wan", "name": "Internet 1"}]}
+    PI_MAC = "e4:5f:01:7d:84:ca"
+
+    def routed(self, targets, ip, devices=()):
+        routes = [{"enabled": True, "network_id": self.CLIENT_ID, "target_devices": targets}]
+        routed, _ = self.call(wd.router_push.routes_through_client, [routes, self.NETWORKS, list(devices)],
+                              {"_id": self.CLIENT_ID}, ip)
+        return routed
+
+    def test_detects_a_network_routed_through_the_client(self):
+        self.assertTrue(self.routed([{"type": "NETWORK", "network_id": self.DEFAULT_NET}], "192.168.11.151"))
+
+    def test_a_bypass_address_isnt_routed_even_if_the_router_files_it_under_default(self):
+        # Seen 2026-11-15 to 17: the Pi's one client entry showed its TinCan address under Default.
+        mixed_up = [{"ip": "192.168.3.151", "mac": self.PI_MAC, "network_id": self.DEFAULT_NET}]
+        self.assertFalse(self.routed([{"type": "NETWORK", "network_id": self.DEFAULT_NET}], "192.168.3.151", mixed_up))
+
+    def test_detects_a_device_routed_by_its_own_address(self):
+        devices = [{"ip": "192.168.3.151", "mac": self.PI_MAC, "network_id": self.DEFAULT_NET}]
+        self.assertTrue(self.routed([{"type": "CLIENT", "client_mac": self.PI_MAC}], "192.168.3.151", devices))
+        self.assertFalse(self.routed([{"type": "CLIENT", "client_mac": "aa:bb:cc:dd:ee:ff"}], "192.168.3.151", devices))
 
 
 if __name__ == "__main__":
