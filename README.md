@@ -44,6 +44,68 @@ The generated config is a standard WireGuard file. The UniFi steps are less cert
 
 Everything else is PIA's original code, unchanged and under their MIT license. PIA's updates come in through GitHub's **Sync fork** button.
 
+## How it works
+
+Two programs share one small library. The web UI makes a config and adds it to the router once, during setup. After that, the watchdog keeps it working.
+
+```mermaid
+flowchart TB
+  subgraph Mac["Your computer, during setup"]
+    page["Browser page<br/>1 Generate · 2 Connect · 3 Add"] --> server["webui/server.py<br/>localhost:8765"]
+  end
+  subgraph Pi["Always-on machine, e.g. a Raspberry Pi"]
+    timer["systemd timer<br/>every ~5 min"] --> wd["watchdog/pia_watchdog.py<br/>+ region_reply.py, state.json"]
+  end
+  subgraph Lib["Shared library: webui/"]
+    pia["pia_config.py<br/>token, server list, new config"]
+    rp["router_push.py<br/>UniFi Network API"]
+  end
+  server -- imports --> Lib
+  wd -- imports --> Lib
+  pia -- "uses" --> script["connect_to_wireguard_with_token.sh<br/>(PIA's script)"]
+  pia -- "token · servers · addKey" --> PIA[("Private Internet Access")]
+  script -- "addKey on port 1337" --> PIA
+  rp -- "log in · status · swap config" --> Router[("UniFi router")]
+  wd -- "send alerts, read replies" --> Mail[("Email: SMTP and IMAP")]
+```
+
+### The watchdog's network path
+
+When the router sends a whole network through the PIA client with the kill switch on, a failed tunnel cuts that network off, including the watchdog if it sits there. So the watchdog's own traffic can take a [bypass network](watchdog/README.md#bypass-network) that isn't routed through the VPN, and it looks up names through public DNS servers rather than the router.
+
+```mermaid
+flowchart LR
+  devices["Devices on the routed network"] --> router["UniFi router"]
+  watchdog["Watchdog's traffic<br/>bypass VLAN, public DNS"] --> router
+  router -- "through the tunnel, kill switch on" --> tunnel["PIA WireGuard client"] --> net(("Internet"))
+  router -. "straight out, no VPN" .-> net
+```
+
+### One watchdog run
+
+Each run takes the first exit it reaches, then decides whether to email and saves its state for the next run.
+
+```mermaid
+flowchart TD
+  start(["Timer starts a run"]) --> load["Load config.json and state.json<br/>(a region chosen by email overrides the config's)"]
+  load --> reply{"A reply to a region email<br/>from the last 24 h?"}
+  reply -- "yes, trusted, names a region" --> switch["Switch region, replace the config now,<br/>email a confirmation"] --> email
+  reply -- no --> login["Log in to the router,<br/>find the WireGuard client"]
+  login -- "not found / router errors" --> alert["Alert email"] --> email
+  login --> paused{"Client paused?"}
+  paused -- yes --> leave["Leave it alone, reset counts"] --> email
+  paused -- no --> health{"Router says CONNECTED?"}
+  health -- yes --> healthy["Healthy. Daily PIA login check"] --> email
+  health -- no --> count{"Fewer than 3 bad<br/>checks in a row?"}
+  count -- "yes, wait 60 s" --> login
+  count -- no --> capped{"3 replacements in a row<br/>failed, last one under 60 min ago?"}
+  capped -- yes --> down["Email: new servers aren't fixing it,<br/>with a list of regions to reply with"] --> email
+  capped -- no --> replace["New key on another server in the region,<br/>swap it into the same router client"] --> email
+  email["Email if needed: once per problem, reminders every 6 h,<br/>'reconnected' / 'resolved' when it clears. Save state.json"] --> done(["Done"])
+```
+
+[watchdog/README.md](watchdog/README.md) covers installing it, the settings, and the email alerts.
+
 ---
 
 *The rest of this file is PIA's original README.*
