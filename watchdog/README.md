@@ -100,6 +100,8 @@ A new server that stays connected for 10 minutes counts as a success and clears 
 
 After 3 failures in a row, about 20 minutes in, this is likely more than one bad server. The watchdog emails you and slows down to one new server an hour, so it recovers by itself when the problem clears, without requesting new keys every few minutes. There's no limit on replacements that work, so if it's replacing a lot, the emails are how you'll know.
 
+If you pause the VPN client in the Network app, the watchdog leaves it alone and logs that it's paused. When you resume it, the watchdog starts counting from zero again, so it gets the usual 3 checks and 3 fast replacements.
+
 ## How the passwords are stored
 
 The PIA password, router password, and email password (if alerts are on) are encrypted with `systemd-creds` and stored in `/etc/credstore.encrypted/`. The installer pipes them straight into the encryption, so they never touch disk in plaintext. They're decrypted only while the watchdog runs, into a private in-memory location that only the watchdog can read. The watchdog runs as its own system user (`pia-watchdog`), which has no login, no home folder, and no access to yours.

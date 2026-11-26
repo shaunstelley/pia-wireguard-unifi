@@ -164,6 +164,23 @@ class CheckOnceTests(unittest.TestCase):
         event, _ = wd.check_once(CONFIG, {"unhealthy_checks": 0}, NOW)
         self.assertEqual(event, "no_client")
 
+    def test_paused_client_is_left_alone(self):
+        wd.router_push.find_wireguard_client.return_value = {**CLIENT, "enabled": False}
+        state = {"unhealthy_checks": 2, "failed_replacements": 3, "connected_since": NOW - 60}
+        with mock.patch.object(wd.pia_config, "generate_conf") as generate:
+            event, state = wd.check_once({**CONFIG, "dry_run": False}, state, NOW)
+        self.assertEqual(event, "paused")
+        generate.assert_not_called()
+        wd.router_push.update_wireguard_client.assert_not_called()
+        wd.router_push.wireguard_client_health.assert_not_called()
+        self.assertEqual((state["unhealthy_checks"], state["failed_replacements"]), (0, 0))
+        self.assertNotIn("connected_since", state)
+        self.assertIn("paused", self.logged())
+
+    def test_paused_is_not_an_alert(self):
+        self.assertNotIn("paused", wd.ALERTS)
+        self.assertNotIn("paused", wd.FAILED)
+
     def test_replace_now_ignores_dry_run_and_health(self):
         with mock.patch.object(wd.pia_config, "generate_conf", return_value=("NEW", "US Texas", "2.2.2.2")):
             event, state = wd.check_once(CONFIG, {"unhealthy_checks": 0}, NOW, replace_now=True)
