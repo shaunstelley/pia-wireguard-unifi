@@ -41,6 +41,8 @@ ip route get 1.1.1.1 uid "$(id -u pia-watchdog)"
 
 This should show the VLAN interface (e.g. `eth0.2`), not your main one.
 
+The watchdog also looks up names through public DNS servers (`1.1.1.1`, then `8.8.8.8`; see `watchdog/systemd/resolv.conf`), not the machine's usual ones. Those are often the router. On 2026-11-25, lookups through the router failed while the tunnel was down, so the watchdog couldn't reach PIA to replace the config, and the VPN stayed down for 8 hours. This only applies to the watchdog's own service.
+
 ## Check the logins
 
 The PIA password is only needed when a replacement happens, so a normal check doesn't prove it works. To confirm both logins and see the client's status, changing nothing:
