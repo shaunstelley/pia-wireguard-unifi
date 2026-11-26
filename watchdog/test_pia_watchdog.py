@@ -247,6 +247,11 @@ class CheckOnceTests(unittest.TestCase):
 class AlertTests(unittest.TestCase):
     EMAIL_CONFIG = {**CONFIG, "alert_email": "me@example.com", "smtp_username": "sender@example.com"}
 
+    def setUp(self):
+        menu = mock.patch.object(wd, "region_menu", return_value=(None, None))  # it measures over the network
+        menu.start()
+        self.addCleanup(menu.stop)
+
     def plan(self, state, event, now=NOW):
         return wd.plan_alert(state, event, now, CONFIG)
 

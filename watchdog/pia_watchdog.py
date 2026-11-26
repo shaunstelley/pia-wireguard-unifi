@@ -7,6 +7,7 @@ watchdog/README.md.
 """
 
 import argparse
+import imaplib
 import json
 import os
 import re
@@ -17,12 +18,14 @@ import sys
 import time
 import traceback
 from email.message import EmailMessage
+from email.utils import make_msgid
 from pathlib import Path
 from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "webui"))
 import pia_config  # noqa: E402
 import router_push  # noqa: E402
+import region_reply  # noqa: E402
 
 DAY_SECONDS = 24 * 60 * 60
 HISTORY_DAYS = 30
@@ -38,6 +41,7 @@ DEFAULTS = {
     "smtp_port": 465,
     "alert_reminder_hours": 6,
     "router_errors_before_alert": 2,
+    "region_menu_hours": 24,
 }
 
 # Run results worth an email, with their subjects. Each one opens an alert
@@ -201,15 +205,33 @@ def replacement_stats(state, now):
     return "\n".join(lines)
 
 
-def send_email(config, subject, body):
-    msg = EmailMessage()
-    msg["Subject"] = f"PIA watchdog: {subject}"
-    msg["From"] = config.get("smtp_username") or config["alert_email"]
-    msg["To"] = config["alert_email"]
-    msg.set_content(f"{body}\n\n(pia-watchdog on {socket.gethostname()}; logs: journalctl -u pia-watchdog)\n")
+def email_account(config):
+    return config.get("smtp_username") or config["alert_email"]
+
+
+def email_password(config):
     password = read_secret("smtp_password")
     if config["smtp_server"] == "smtp.gmail.com":
         password = password.replace(" ", "")  # Gmail shows app passwords in groups of four
+    return password
+
+
+def imap_server(config):
+    """Where replies to the alerts are read from, or None if that isn't set up."""
+    if config.get("imap_server"):
+        return config["imap_server"]
+    return "imap.gmail.com" if config["smtp_server"] == "smtp.gmail.com" else None
+
+
+def send_email(config, subject, body):
+    """Sends an email and returns its Message-ID."""
+    msg = EmailMessage()
+    msg["Subject"] = f"PIA watchdog: {subject}"
+    msg["From"] = email_account(config)
+    msg["To"] = config["alert_email"]
+    msg["Message-ID"] = make_msgid(domain=msg["From"].rsplit("@", 1)[-1])
+    msg.set_content(f"{body}\n\n(pia-watchdog on {socket.gethostname()}; logs: journalctl -u pia-watchdog)\n")
+    password = email_password(config)
     context = ssl.create_default_context()
     implicit_tls = config["smtp_port"] == 465
     smtp_class = smtplib.SMTP_SSL if implicit_tls else smtplib.SMTP
@@ -219,6 +241,36 @@ def send_email(config, subject, body):
             smtp.starttls(context=context)
         smtp.login(msg["From"], password)
         smtp.send_message(msg)
+    return msg["Message-ID"]
+
+
+def notify(config, subject, body):
+    """A one-off email, outside the alert cycle. Failures are only logged."""
+    try:
+        send_email(config, subject, body)
+    except (OSError, RuntimeError) as e:
+        log(f"Couldn't send the email: {e}")
+
+
+def region_menu(config):
+    """(menu text, its region ids) for the "new servers aren't fixing it"
+    email, or (None, None) if there's nothing to offer."""
+    try:
+        regions = pia_config.fetch_regions()
+        menu = region_reply.build_menu(regions, region_reply.measure(regions), config["region_id"])
+    except (OSError, ValueError, KeyError) as e:
+        log(f"Couldn't list other regions for the email: {e}")
+        return None, None
+    if not menu:
+        return None, None
+    current = next((r["name"] for r in regions if r["id"] == config["region_id"]), config["region_id"])
+    return region_reply.menu_text(menu, current, config["region_menu_hours"]), [m[0] for m in menu]
+
+
+def remember_menu(state, message_id, options, now, config):
+    keep = config["region_menu_hours"] * 3600
+    menus = [m for m in state.get("region_menus", []) if now - m["sent_at"] < keep]
+    return {**state, "region_menus": menus + [{"message_id": message_id, "options": options, "sent_at": now}]}
 
 
 def send_alert(config, state, event, now):
@@ -230,12 +282,97 @@ def send_alert(config, state, event, now):
     if subject is None:
         return new_state
     messages = state.get("alert", {}).get("log", []) + run_log
+    sections = ["\n".join(messages)]
+    options = None
+    if event == "capped" and imap_server(config):
+        menu, options = region_menu(config)
+        if menu:
+            sections.append(menu)
+    body = "\n\n".join(sections + [replacement_stats(state, now)])
     try:
-        send_email(config, subject, "\n".join(messages) + "\n\n" + replacement_stats(state, now))
+        message_id = send_email(config, subject, body)
     except (OSError, RuntimeError) as e:
         log(f"Couldn't send the alert email: {e}")
         return state
-    return new_state
+    return remember_menu(new_state, message_id, options, now, config) if options else new_state
+
+
+def with_region_override(config, state):
+    """The config with the region chosen by email, unless region_id in the
+    config file has changed since (a manual edit wins)."""
+    override = state.get("region_override")
+    if override and override.get("base") == config["region_id"]:
+        return {**config, "region_id": override["id"]}
+    return config
+
+
+def check_region_replies(config, state, now):
+    """Looks for a reply to a recent region menu. Returns (state, region id
+    asked for or None). Replies that fail the sender check, or that can't be
+    read as a region, are logged and skipped, and each reply is acted on once."""
+    keep = config["region_menu_hours"] * 3600
+    menus = [m for m in state.get("region_menus", []) if now - m["sent_at"] < keep]
+    state = {k: v for k, v in state.items() if k != "region_menus"}
+    if not menus:
+        return state, None
+    state["region_menus"] = menus
+    if not config.get("alert_email") or not imap_server(config):
+        return state, None
+    try:
+        replies = region_reply.fetch_replies(imap_server(config), email_account(config), email_password(config),
+                                             config["alert_email"], min(m["sent_at"] for m in menus))
+    except (OSError, imaplib.IMAP4.error) as e:
+        log(f"Couldn't check for replies to the region email: {e}")
+        return state, None
+    seen = list(state.get("seen_replies", []))
+    regions = None
+    for msg in replies:
+        reply_id = msg.get("Message-ID", "")
+        menu_id = region_reply.answers(msg, [m["message_id"] for m in menus])
+        if menu_id is None or reply_id in seen:
+            continue
+        seen.append(reply_id)
+        state["seen_replies"] = seen[-50:]
+        if not region_reply.trusted_sender(msg, config["alert_email"]):
+            log(f"Ignored a reply that says it's from {config['alert_email']} but failed the sender check.")
+            continue
+        text = region_reply.first_line(msg)
+        regions = regions if regions is not None else pia_config.fetch_regions()
+        options = next(m["options"] for m in menus if m["message_id"] == menu_id)
+        choice = region_reply.parse_choice(text, options, regions)
+        if choice is None:
+            log(f"Couldn't tell which region the reply {text!r} means.")
+            notify(config, "Couldn't read your reply",
+                   f"Your reply said {text!r}. Reply to the region email again with one of its numbers, "
+                   "or a region's name or id. Nothing has changed.")
+            continue
+        return state, choice
+    return state, None
+
+
+def switch_region(file_config, config, state, region_id, now):
+    """Switches to the region asked for by email and replaces the config right
+    away. file_config is the config as written, config the one in effect."""
+    state = {k: v for k, v in state.items() if k != "region_menus"}  # answered
+    name = next((r["name"] for r in pia_config.fetch_regions() if r["id"] == region_id), region_id)
+    if region_id == config["region_id"]:
+        log(f"The reply asked for {name}, which is already in use, so nothing changed.")
+        notify(config, f"Already using {name}", f"You asked for {name}, which the watchdog already uses. "
+               "Nothing changed.")
+        return check_once(config, state, now)
+    if region_id == file_config["region_id"]:
+        state.pop("region_override", None)
+    else:
+        state["region_override"] = {"id": region_id, "base": file_config["region_id"]}
+    state["failed_replacements"] = 0
+    log(f"Switching to {name}, as asked by email.")
+    event, state = check_once({**config, "region_id": region_id}, state, now, replace_now=True)
+    if event == "replaced":
+        notify(config, f"Switched to {name}",
+               f"As you asked, the VPN is now set up for {name} (server {state.get('last_server_ip')}). "
+               f"You'll get an email when it connects. Reply \"{file_config['region_id']}\" to a later region "
+               "email to go back to the configured region, or change region_id in the config file.")
+    return event, state
 
 
 def verify(config):
@@ -337,6 +474,22 @@ def check_once(config, state, now, replace_now=False):
     return "replaced", state
 
 
+def send_region_menu(config, state, state_path):
+    """Emails the region list on request. A reply to it works like one to an alert."""
+    if not config.get("alert_email") or not imap_server(config):
+        log("Email alerts, and replies to them, aren't set up.")
+        return 1
+    menu, options = region_menu(config)
+    if not menu:
+        log("No other regions answered, so there's nothing to offer.")
+        return 1
+    now = time.time()
+    message_id = send_email(config, "Switch regions by replying", menu)
+    save_state(state_path, remember_menu(state, message_id, options, now, config))
+    log(f"Sent the region list to {config['alert_email']}.")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--config", type=Path, help="JSON config file (see watchdog/README.md)")
@@ -345,6 +498,8 @@ def main():
                         help="replace the config immediately, even in dry-run mode (use watchdog/replace-now.sh)")
     parser.add_argument("--verify", action="store_true",
                         help="check the router and PIA logins, change nothing (use watchdog/verify.sh)")
+    parser.add_argument("--send-region-menu", action="store_true",
+                        help="email the region list now, to try switching by reply (use watchdog/sandboxed.sh)")
     args = parser.parse_args()
 
     if args.list_regions:
@@ -359,8 +514,16 @@ def main():
         return verify(config)
     state_path = Path(os.environ.get("STATE_DIRECTORY", ".")) / "state.json"
     state = load_state(state_path)
+    file_config, config = config, with_region_override(config, state)
+    if args.send_region_menu:
+        return send_region_menu(config, state, state_path)
     try:
-        event, state = check_once(config, state, time.time(), replace_now=args.replace_now)
+        state, choice = check_region_replies(config, state, time.time())
+        if choice is not None:
+            event, state = switch_region(file_config, config, state, choice, time.time())
+            config = with_region_override(file_config, state)
+        else:
+            event, state = check_once(config, state, time.time(), replace_now=args.replace_now)
         # After a failed check, don't wait for the timer to count the next ones.
         while event == "waiting" and config["recheck_seconds"]:
             time.sleep(config["recheck_seconds"])
