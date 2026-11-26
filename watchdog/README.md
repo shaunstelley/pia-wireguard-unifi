@@ -102,6 +102,28 @@ After 3 failures in a row, about 20 minutes in, this is likely more than one bad
 
 If you pause the VPN client in the Network app, the watchdog leaves it alone and logs that it's paused. When you resume it, the watchdog starts counting from zero again, so it gets the usual 3 checks and 3 fast replacements.
 
+## Switch regions by email
+
+When the watchdog emails that new servers aren't fixing it, the email also lists other regions to try. Texas regions come first, then the 3 fastest others. Each one shows how long its server took to answer from this machine. Only US regions that answered are listed, and the current one isn't.
+
+To switch, reply with the number, or any region's name or id (`houston`, `dallas`, `us_denver`). Only the first line of your reply counts. Within about 5 minutes, the watchdog switches to that region, puts a new config on the router straight away, and emails you. You get the usual email when it connects. If it can't read your reply, it emails you back and changes nothing.
+
+The choice lasts until you reply with another region, including the configured one, or until `region_id` in the config file changes. It's kept in `state.json`, not in the config file.
+
+How it reads replies: it signs in over IMAP to the account that sends the alerts (`smtp_username`), with the same app password, and only reads the inbox. It acts on a reply only when all of these hold:
+
+- the reply answers one of its region emails from the last 24 hours (`region_menu_hours`)
+- it comes from `alert_email`, and the receiving mail server's sender check passed for that address's domain (DMARC, or DKIM signed by that domain), so a forged From line isn't enough
+- the watchdog hasn't already acted on it
+
+Gmail needs IMAP turned on for the sending account (Settings › Forwarding and POP/IMAP). For other providers, set `imap_server`. Without either, the emails have no region list.
+
+To try it without waiting for an outage, email the list now. Then reply with the current region's name to see the round trip without changing anything:
+
+```bash
+sudo /opt/pia-wireguard-unifi/watchdog/sandboxed.sh --send-region-menu
+```
+
 ## How the passwords are stored
 
 The PIA password, router password, and email password (if alerts are on) are encrypted with `systemd-creds` and stored in `/etc/credstore.encrypted/`. The installer pipes them straight into the encryption, so they never touch disk in plaintext. They're decrypted only while the watchdog runs, into a private in-memory location that only the watchdog can read. The watchdog runs as its own system user (`pia-watchdog`), which has no login, no home folder, and no access to yours.
@@ -126,6 +148,8 @@ The PIA password, router password, and email password (if alerts are on) are enc
 | `max_failed_replacements` | Replacements in a row that don't hold before slowing down (default `3`) |
 | `stable_connection_minutes` | How long a connection must hold to count as a success (default `10`) |
 | `retry_minutes_after_failed_replacements` | Time between new servers once it has slowed down (default `60`) |
+| `region_menu_hours` | How long a region email can be answered (default `24`) |
+| `imap_server` | Where to read replies to the region email (default `imap.gmail.com` when sending through Gmail) |
 | `alert_email` | Where to send [email alerts](#email-alerts); leave it out to turn them off |
 | `smtp_username` | The email account that sends them (default: `alert_email`) |
 | `smtp_server` | Its SMTP server (default `smtp.gmail.com`) |
