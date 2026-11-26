@@ -41,6 +41,8 @@ ip route get 1.1.1.1 uid "$(id -u pia-watchdog)"
 
 This should show the VLAN interface (e.g. `eth0.2`), not your main one.
 
+The watchdog also looks up names through public DNS servers (`1.1.1.1`, then `8.8.8.8`; see `watchdog/systemd/resolv.conf`), not the machine's usual ones. Those are often the router. On 2026-11-25, lookups through the router failed while the tunnel was down, so the watchdog couldn't reach PIA to replace the config, and the VPN stayed down for 8 hours. This only applies to the watchdog's own service.
+
 ## Check the logins
 
 The PIA password is only needed when a replacement happens, so a normal check doesn't prove it works. To confirm both logins and see the client's status, changing nothing:
@@ -97,6 +99,8 @@ This works even in dry-run mode, and even when it has [stopped replacing](#when-
 A new server that stays connected for 10 minutes counts as a success and clears the count, so a replacement that's needed days or hours later is never held back. One that doesn't connect, or drops sooner than that, counts as a failure.
 
 After 3 failures in a row, about 20 minutes in, this is likely more than one bad server. The watchdog emails you and slows down to one new server an hour, so it recovers by itself when the problem clears, without requesting new keys every few minutes. There's no limit on replacements that work, so if it's replacing a lot, the emails are how you'll know.
+
+If you pause the VPN client in the Network app, the watchdog leaves it alone and logs that it's paused. When you resume it, the watchdog starts counting from zero again, so it gets the usual 3 checks and 3 fast replacements.
 
 ## How the passwords are stored
 

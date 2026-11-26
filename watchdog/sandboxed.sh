@@ -16,6 +16,7 @@ exec systemd-run --quiet --pipe --wait --collect \
   --unit="pia-watchdog-manual-$$" \
   -p User=pia-watchdog -p Group=pia-watchdog -p StateDirectory=pia-watchdog \
   -p ProtectHome=yes -p PrivateTmp=yes -p "RestrictAddressFamilies=AF_INET AF_UNIX" \
+  -p "BindReadOnlyPaths=$REPO_DIR/watchdog/systemd/resolv.conf:/etc/resolv.conf" \
   -p "LoadCredentialEncrypted=pia_password:$CRED_DIR/pia-watchdog-pia_password" \
   -p "LoadCredentialEncrypted=router_password:$CRED_DIR/pia-watchdog-router_password" \
   "${email[@]}" \

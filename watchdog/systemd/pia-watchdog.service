@@ -22,6 +22,8 @@ PrivateDevices=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
+# Public DNS servers instead of the router's: lookups must work while the tunnel is down.
+BindReadOnlyPaths=@REPO_DIR@/watchdog/systemd/resolv.conf:/etc/resolv.conf
 # IPv4 only: the bypass routing rule is IPv4, and PIA's API works over IPv4.
 RestrictAddressFamilies=AF_INET AF_UNIX
 RestrictNamespaces=yes

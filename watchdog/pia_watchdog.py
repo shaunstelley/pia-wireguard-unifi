@@ -272,7 +272,7 @@ def verify(config):
 
 def check_once(config, state, now, replace_now=False):
     """Returns (event, state), event being one of "healthy", "waiting",
-    "replaced", or an ALERTS key. replace_now skips the health check, the
+    "paused", "replaced", or an ALERTS key. replace_now skips the health check, the
     threshold, and dry-run mode, and replaces immediately."""
     opener, csrf = router_push.login(config["router_url"], config["router_username"], read_secret("router_password"))
     client = router_push.find_wireguard_client(opener, csrf, config["router_url"], config["client_name"])
@@ -280,6 +280,13 @@ def check_once(config, state, now, replace_now=False):
         log(f"No WireGuard VPN client named {config['client_name']!r} on the router.")
         return "no_client", state
     warn_if_routed_through(opener, csrf, config, client)
+    if client.get("enabled") is False and not replace_now:
+        # Paused by hand in the Network app. A paused client never connects, so
+        # replacing it would only burn through servers. Start fresh when it's resumed.
+        log(f"VPN client {config['client_name']!r} is paused on the router, so leaving it alone.")
+        state = {**state, "unhealthy_checks": 0, "failed_replacements": 0}
+        state.pop("connected_since", None)
+        return "paused", state
 
     threshold = config["unhealthy_checks_before_replacing"]
     if replace_now:
